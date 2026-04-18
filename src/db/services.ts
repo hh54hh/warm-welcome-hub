@@ -60,11 +60,29 @@ export async function createProduct(
 
 export async function updateProduct(id: string, patch: Partial<Product>) {
   await db.products.update(id, { ...patch, updatedAt: now(), syncStatus: "local" });
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after updateProduct failed:", err));
+  }
   return db.products.get(id);
 }
 
 export async function deleteProduct(id: string) {
-  await db.products.delete(id);
+  // Soft delete so the sync layer can propagate it to Supabase
+  const existing = await db.products.get(id);
+  if (!existing) return;
+  if (existing.remoteId) {
+    await db.products.update(id, {
+      syncStatus: "deleted",
+      deletedAt: now(),
+      updatedAt: now(),
+    });
+    if (getSupabase()) {
+      syncWithSupabase().catch((err) => console.warn("Auto-sync after deleteProduct failed:", err));
+    }
+  } else {
+    // Never reached the cloud, safe to fully remove locally
+    await db.products.delete(id);
+  }
 }
 
 export async function adjustStock(productId: string, delta: number, note?: string) {
@@ -72,7 +90,11 @@ export async function adjustStock(productId: string, delta: number, note?: strin
   if (!p) throw new Error("منتج غير موجود");
   const newStock = p.stock + delta;
   if (newStock < 0) throw new Error("لا توجد كمية كافية في المخزن");
-  await db.products.update(productId, { stock: newStock, updatedAt: now() });
+  await db.products.update(productId, {
+    stock: newStock,
+    updatedAt: now(),
+    syncStatus: "local", // Critical: mark dirty so pull doesn't overwrite
+  });
   await db.movements.add({
     id: uid(),
     productId,
@@ -83,6 +105,9 @@ export async function adjustStock(productId: string, delta: number, note?: strin
     updatedAt: now(),
     syncStatus: "local",
   });
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after adjustStock failed:", err));
+  }
 }
 
 /* ========== الفئات ========== */
