@@ -271,6 +271,15 @@ const Customers = () => {
           onClose={() => setPrintStatement(null)}
         />
       )}
+
+      <PayCreditDialog
+        open={!!payTarget}
+        onOpenChange={(v) => !v && setPayTarget(null)}
+        customerId={payTarget?.recordId}
+        customerName={payTarget?.name}
+        balance={payTarget?.balance ?? 0}
+        onPaid={() => setPayTarget(null)}
+      />
     </div>
   );
 };
