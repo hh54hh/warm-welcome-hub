@@ -890,11 +890,24 @@ export async function pullFromSupabase() {
       for (const price of productPrices) {
         const existingPrice = await db.product_prices.where('remoteId').equals(price.id.toString()).first();
 
-        const priceData = {
-          productId: price.product_id.toString(),
-          price: price.price,
+        // ابحث عن المنتج المحلي المرتبط برقم product_id من السحابة
+        const remoteProductIdStr = price.product_id != null ? price.product_id.toString() : "";
+        let localProduct = remoteProductIdStr
+          ? await db.products.where('remoteId').equals(remoteProductIdStr).first()
+          : undefined;
+        if (!localProduct && remoteProductIdStr) {
+          localProduct = await db.products.get(remoteProductIdStr);
+        }
+        // المعرّف المحلي للمنتج (UUID إن وُجد، وإلا رقم product_id)
+        const localProductId = localProduct?.id ?? remoteProductIdStr;
+
+        const priceData: any = {
+          productId: localProductId, // احتفظ دائماً بالمعرّف المحلي للمنتج لضمان عمل بحث الأسعار
+          product_id: remoteProductIdStr || undefined,
+          price: Number(price.price) || 0,
           type: price.type,
           isActive: price.is_active,
+          is_active: price.is_active,
           effectiveFrom: price.effective_from ? new Date(price.effective_from).getTime() : Date.now(),
           effectiveTo: price.effective_to ? new Date(price.effective_to).getTime() : undefined,
           notes: price.notes,
@@ -906,10 +919,13 @@ export async function pullFromSupabase() {
         };
 
         if (existingPrice) {
-          // Update existing local record
-          await db.product_prices.update(existingPrice.id, priceData);
+          // لا تغيّر productId المحلي إذا كان يشير لـ UUID صحيح
+          // (existingPrice.productId قد يكون UUID للمنتج المحلي — احتفظ به)
+          const preserveProductId = existingPrice.productId && localProduct && existingPrice.productId === localProduct.id
+            ? existingPrice.productId
+            : localProductId;
+          await db.product_prices.update(existingPrice.id, { ...priceData, productId: preserveProductId });
         } else {
-          // Add new record
           await db.product_prices.put({
             id: price.id.toString(),
             ...priceData,
