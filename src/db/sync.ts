@@ -309,14 +309,6 @@ export async function syncWithSupabase(): Promise<SyncResult> {
       }
     };
 
-    for (const { table, record } of activeRecords) {
-      try {
-        await syncRecord(table, record);
-      } catch (err) {
-        errors.push(`Failed to sync ${table} record ${record.id}: ${err}`);
-      }
-    }
-
     // 2. عالج عمليات الحذف أولاً قبل الـ upserts و الـ pull
     for (const { table, record } of deletedRecords.sort((a, b) => {
       const indexA = SYNC_TABLES.findIndex((t) => t.name === a.table);
