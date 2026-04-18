@@ -257,34 +257,76 @@ export async function deleteCustomer(id: string) {
   const customer = await db.customers.get(id);
   if (!customer) return;
 
-  await db.transaction("rw", [db.customers, db.invoices, db.payments, db.customer_credits, db.credit_payments], async () => {
-    // Detach customer from invoices and mark them pending so the change is pushed
-    await db.invoices.where("customerId").equals(id).modify({
-      customerId: undefined,
-      customerName: undefined,
-      customerPhone: undefined,
-      updatedAt: now(),
-      syncStatus: "local",
-    });
-    // Local-only payment & credit records — local deletes are fine
-    await db.payments.where("customerId").equals(id).delete();
-    await db.customer_credits.where("customer_id").equals(id).delete();
+  const remoteId = customer.remoteId ? customer.remoteId.toString() : undefined;
 
-    if (customer.remoteId) {
-      // Soft delete: sync layer will DELETE on Supabase
-      await db.customers.update(id, {
-        syncStatus: "deleted",
-        deletedAt: now(),
+  // 1) إزالة فورية من القاعدة المحلية + إنشاء قبر لمنع إعادة الظهور بعد المزامنة
+  await db.transaction(
+    "rw",
+    [db.customers, db.invoices, db.payments, db.customer_credits, db.credit_payments, (db as any).tombstones],
+    async () => {
+      // فصل الزبون عن الفواتير وتحديثها للمزامنة
+      await db.invoices.where("customerId").equals(id).modify({
+        customerId: undefined,
+        customerName: undefined,
+        customerPhone: undefined,
         updatedAt: now(),
+        syncStatus: "local",
       });
-    } else {
-      // Never synced — just remove locally
-      await db.customers.delete(id);
-    }
-  });
+      // حذف السجلات المحلية المرتبطة
+      await db.payments.where("customerId").equals(id).delete();
+      await db.customer_credits.where("customer_id").equals(id).delete();
 
-  if (getSupabase()) {
-    syncWithSupabase().catch((err) => console.warn("Auto-sync after deleteCustomer failed:", err));
+      // أنشئ قبراً (tombstone) قبل الحذف ليتذكر النظام أن هذا الزبون محذوف
+      // حتى لو فشل الحذف على السحابة أو عاد عبر pull لاحقاً
+      if (remoteId) {
+        await (db as any).tombstones.put({
+          id: `customers:${remoteId}`,
+          table: "customers",
+          remoteId,
+          deletedAt: now(),
+        });
+      }
+      await (db as any).tombstones.put({
+        id: `customers:local:${id}`,
+        table: "customers",
+        remoteId,
+        deletedAt: now(),
+      });
+
+      // احذف الزبون فعلياً من المحلي فوراً (UI تتحدث مباشرة)
+      await db.customers.delete(id);
+    },
+  );
+
+  // 2) محاولة الحذف من السحابة في الخلفية (لا يعطل الواجهة)
+  if (remoteId && getSupabase()) {
+    void (async () => {
+      try {
+        const supabase = getSupabase();
+        if (!supabase) return;
+        const numericId = Number(remoteId);
+        const targetId = Number.isFinite(numericId) ? numericId : remoteId;
+
+        // حاول الحذف الكامل أولاً
+        const { error: delError } = await supabase.from("customers").delete().eq("id", targetId);
+        if (delError) {
+          // إن فشل (RLS, FK, أو أي سبب) — جرّب soft delete (is_active = false)
+          const { error: softError } = await supabase
+            .from("customers")
+            .update({ is_active: false, updated_at: new Date().toISOString() })
+            .eq("id", targetId);
+          if (softError) {
+            console.warn(`⚠️ تعذّر حذف الزبون من السحابة (${remoteId}): ${softError.message}. القبر سيمنع عودته محلياً.`);
+          } else {
+            console.log(`🗑️ تم تعطيل الزبون ${remoteId} على السحابة (soft delete)`);
+          }
+        } else {
+          console.log(`🗑️ تم حذف الزبون ${remoteId} من السحابة بالكامل`);
+        }
+      } catch (err) {
+        console.warn(`⚠️ خطأ أثناء حذف الزبون من السحابة:`, err);
+      }
+    })();
   }
 }
 
