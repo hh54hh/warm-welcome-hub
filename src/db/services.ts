@@ -51,6 +51,10 @@ export async function createProduct(
     syncStatus: "local",
   };
   await db.products.add(product);
+  // Trigger background sync (non-blocking)
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after createProduct failed:", err));
+  }
   return product;
 }
 
