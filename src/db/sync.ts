@@ -268,26 +268,50 @@ export async function syncWithSupabase(): Promise<SyncResult> {
       const supabaseTable = SYNC_TABLES.find((t) => t.name === table)?.supabaseTable;
       if (!supabaseTable) return;
 
+      const target = (db as any)[table];
       const remoteKey = normalizeId(record.remoteId ?? record.id);
+
+      // No remote id — just remove locally
       if (remoteKey === undefined) {
-        await markRecordsSynced(table, [record.id]);
+        if (target) await target.delete(record.id);
         syncedCount++;
+        console.log(`🗑️ تم حذف ${table} record ${record.id} محلياً (بدون معرف بعيد)`);
         return;
       }
 
-      const { error } = await supabase.from(supabaseTable).delete().eq("id", remoteKey);
+      // Try DELETE first; if FK constraint blocks it, fall back to soft delete via is_active=false
+      let { error } = await supabase.from(supabaseTable).delete().eq("id", remoteKey);
+
       if (error) {
         const missingRelation = /(relation ".*" does not exist|missing relation)/i.test(error.message || "");
         if (missingRelation) {
           console.warn(`Skipping delete sync for ${table} because remote table ${supabaseTable} does not exist: ${error.message}`);
-          await markRecordsSynced(table, [record.id]);
+          if (target) await target.delete(record.id);
           syncedCount++;
           return;
         }
+
+        // Foreign key violation — soft-delete remotely instead
+        const fkConflict = /(foreign key|violates foreign key constraint|conflict)/i.test(error.message || "");
+        if (fkConflict && (table === "customers" || table === "products" || table === "categories")) {
+          const softPayload: any = { is_active: false, updated_at: new Date().toISOString() };
+          const softResult = await supabase.from(supabaseTable).update(softPayload).eq("id", remoteKey);
+          if (!softResult.error) {
+            if (target) await target.delete(record.id);
+            syncedCount++;
+            console.log(`🗑️ تم تعطيل ${table} record ${record.id} (soft delete remote, FK محمي)`);
+            return;
+          }
+          error = softResult.error;
+        }
+
         errors.push(`Error deleting ${table} record ${record.id}: ${error.message}`);
+        console.error(`❌ فشل حذف ${table} record ${record.id}:`, error);
       } else {
-        await markRecordsSynced(table, [record.id]);
+        // Success — physically remove from local DB
+        if (target) await target.delete(record.id);
         syncedCount++;
+        console.log(`🗑️ تم حذف ${table} record ${record.id} من السحابة والمحلي`);
       }
     };
 
