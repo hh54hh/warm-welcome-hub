@@ -187,6 +187,56 @@ async function transformRecordForSupabase(tableName: string, record: any): Promi
       return payload;
     }
 
+    case "product_prices": {
+      const productRemoteId = await resolveRemoteId("products", record.productId);
+      if (productRemoteId === null || productRemoteId === undefined) {
+        // المنتج لم يُزامَن بعد — لا نستطيع رفع السعر الآن
+        throw new Error("PRODUCT_NOT_SYNCED_YET");
+      }
+      const payload: any = {
+        product_id: productRemoteId,
+        price: record.price,
+        type: record.type,
+        is_active: record.isActive !== false,
+        effective_from: record.effectiveFrom ? new Date(record.effectiveFrom).toISOString() : new Date().toISOString(),
+        effective_to: record.effectiveTo ? new Date(record.effectiveTo).toISOString() : null,
+        notes: record.notes || null,
+        quantity: record.quantity || 0,
+        created_at: baseRecord.created_at,
+        updated_at: baseRecord.updated_at,
+      };
+      if (remoteId !== undefined) payload.id = remoteId;
+      else if (typeof recordId === "number") payload.id = recordId;
+      return payload;
+    }
+
+    case "product_batches": {
+      const productRemoteId = await resolveRemoteId("products", record.productId);
+      if (productRemoteId === null || productRemoteId === undefined) {
+        throw new Error("PRODUCT_NOT_SYNCED_YET");
+      }
+      const payload: any = {
+        product_id: productRemoteId,
+        batch_name: record.batchName || record.batch_name || `Batch ${Date.now()}`,
+        original_quantity: Math.max(1, Math.floor(record.originalQuantity ?? record.original_quantity ?? 1)),
+        remaining_quantity: Math.max(0, Math.floor(record.remainingQuantity ?? record.remaining_quantity ?? 0)),
+        purchase_price: record.purchasePrice ?? record.purchase_price ?? 0,
+        selling_price: record.sellingPrice ?? record.selling_price ?? 0,
+        marketing_price: record.marketingPrice ?? record.marketing_price ?? null,
+        supplier: record.supplier || null,
+        expiry_date: record.expiryDate || record.expiry_date || null,
+        batch_code: record.batchCode || record.batch_code || null,
+        notes: record.notes || null,
+        is_active: record.isActive !== false,
+        is_expired: record.isExpired === true,
+        created_at: baseRecord.created_at,
+        updated_at: baseRecord.updated_at,
+      };
+      if (remoteId !== undefined) payload.id = remoteId;
+      else if (typeof recordId === "number") payload.id = recordId;
+      return payload;
+    }
+
     default:
       if (remoteId !== undefined) {
         baseRecord.id = remoteId;
@@ -226,7 +276,7 @@ export async function syncWithSupabase(): Promise<SyncResult> {
       if (!supabaseTable) return;
 
       const transformedRecord = await transformRecordForSupabase(table, record);
-      const hasNumericId = transformedRecord.id !== undefined;
+      const hasNumericId = transformedRecord.id !== undefined && transformedRecord.id !== null;
       const response = hasNumericId
         ? await supabase.from(supabaseTable).upsert(transformedRecord, { onConflict: "id" }).select()
         : await supabase.from(supabaseTable).insert(transformedRecord).select();
@@ -326,7 +376,12 @@ export async function syncWithSupabase(): Promise<SyncResult> {
     for (const { table, record } of activeRecords) {
       try {
         await syncRecord(table, record);
-      } catch (err) {
+      } catch (err: any) {
+        // تخطي صامت إذا كان السبب أن المنتج لم يُزامَن بعد — سيُعاد في الدورة التالية
+        if (err?.message === "PRODUCT_NOT_SYNCED_YET" || /PRODUCT_NOT_SYNCED_YET/.test(String(err))) {
+          console.log(`⏸️ تأجيل مزامنة ${table} record ${record.id} حتى مزامنة المنتج`);
+          continue;
+        }
         errors.push(`Failed to sync ${table} record ${record.id}: ${err}`);
       }
     }
