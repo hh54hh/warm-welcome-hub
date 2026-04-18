@@ -25,8 +25,10 @@ interface CustomerSummary {
 }
 
 const Customers = () => {
+  const navigate = useNavigate();
   const [active, setActive] = useState<CustomerSummary | null>(null);
   const [printStatement, setPrintStatement] = useState<CustomerSummary | null>(null);
+  const [payTarget, setPayTarget] = useState<CustomerSummary | null>(null);
 
   const customers = useLiveQuery(
     () => db.customers.orderBy("name").toArray().then((list) => list.filter((c) => !c.deletedAt && c.syncStatus !== "deleted")),
