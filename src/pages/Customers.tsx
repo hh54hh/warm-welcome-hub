@@ -161,7 +161,31 @@ const Customers = () => {
               <div className={`font-bold nums ${c.balance > 0 ? "text-destructive" : "text-success"}`}>
                 {fmtCurrency(c.balance)}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2 justify-end">
+                {c.balance > 0 && c.recordId && (
+                  <Button
+                    size="sm"
+                    className="gradient-gold text-primary font-semibold"
+                    onClick={() => setPayTarget(c)}
+                  >
+                    <Wallet className="h-4 w-4" />
+                    تسديد
+                  </Button>
+                )}
+                {c.balance > 0 && c.invoices.length > 0 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      const lastInv = [...c.invoices].sort((a, b) => b.createdAt - a.createdAt)[0];
+                      if (lastInv) navigate(`/returns/${lastInv.id}`);
+                      else toast.error("لا توجد فاتورة لإنشاء مرتجع");
+                    }}
+                  >
+                    <Undo2 className="h-4 w-4" />
+                    مرتجع
+                  </Button>
+                )}
                 <Button size="sm" variant="ghost" onClick={() => setActive(c)}>
                   عرض الكشف
                 </Button>
