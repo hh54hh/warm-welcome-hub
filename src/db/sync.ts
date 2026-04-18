@@ -317,6 +317,7 @@ export async function syncWithSupabase(): Promise<SyncResult> {
       }
     }
 
+    // 2. عالج عمليات الحذف أولاً قبل الـ upserts و الـ pull
     for (const { table, record } of deletedRecords.sort((a, b) => {
       const indexA = SYNC_TABLES.findIndex((t) => t.name === a.table);
       const indexB = SYNC_TABLES.findIndex((t) => t.name === b.table);
@@ -327,6 +328,21 @@ export async function syncWithSupabase(): Promise<SyncResult> {
       } catch (err) {
         errors.push(`Failed to delete ${table} record ${record.id}: ${err}`);
       }
+    }
+
+    // 3. ارفع السجلات النشطة (إنشاء/تحديث)
+    for (const { table, record } of activeRecords) {
+      try {
+        await syncRecord(table, record);
+      } catch (err) {
+        errors.push(`Failed to sync ${table} record ${record.id}: ${err}`);
+      }
+    }
+
+    // 4. اسحب التحديثات من Supabase أخيراً
+    const pullResult = await pullFromSupabase();
+    if (!pullResult.success) {
+      errors.push(...(pullResult.errors || []));
     }
 
     return {
