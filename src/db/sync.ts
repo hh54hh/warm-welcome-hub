@@ -115,15 +115,15 @@ async function transformRecordForSupabase(tableName: string, record: any): Promi
   switch (tableName) {
     case "products": {
       const categoryText = await resolveCategoryText(record.categoryId);
+      // Schema: name, quantity, description, barcode, category, minimum_stock, is_active
       const payload: any = {
         name: record.name,
-        barcode: record.sku,
+        barcode: record.sku || null,
         category: categoryText,
-        quantity: record.stock || 0,
-        purchase_price: record.costPrice || 0,
-        selling_price: record.salePrice || 0,
-        min_stock: record.minStock || 10,
+        quantity: Math.max(0, Math.floor(record.stock || 0)),
+        minimum_stock: Math.max(0, Math.floor(record.minStock || 10)),
         description: record.notes || null,
+        is_active: true,
         created_at: baseRecord.created_at,
         updated_at: baseRecord.updated_at,
       };
@@ -133,14 +133,17 @@ async function transformRecordForSupabase(tableName: string, record: any): Promi
     }
 
     case "customers": {
+      // Schema: name (non-empty), phone (non-empty), is_active
+      const phone = (record.phone && record.phone.trim()) ? record.phone.trim() : "غير محدد";
       const payload: any = {
         name: record.name,
-        phone: record.phone || "",
+        phone,
         is_active: true,
         created_at: baseRecord.created_at,
         updated_at: baseRecord.updated_at,
       };
-      if (recordId !== undefined) payload.id = recordId;
+      if (remoteId !== undefined) payload.id = remoteId;
+      else if (typeof recordId === "number") payload.id = recordId;
       return payload;
     }
 
