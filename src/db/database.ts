@@ -75,6 +75,9 @@ class BadrDB extends Dexie {
   activity_log!: Table<any, string>;
   user_profiles!: Table<any, string>;
 
+  // قبور للحذف: يمنع المزامنة من إعادة إنشاء سجل تم حذفه محلياً
+  tombstones!: Table<{ id: string; table: string; remoteId?: string; deletedAt: number }, string>;
+
   constructor() {
     super("badr_center_db");
     this.version(2).stores({
@@ -117,6 +120,28 @@ class BadrDB extends Dexie {
       app_settings: "id, key, value, updated_at, syncStatus, remoteId",
       activity_log: "id, user_id, activity_type, table_name, record_id, created_at, syncStatus, remoteId",
       user_profiles: "id, username, full_name, role, is_active, last_login, syncStatus, remoteId",
+    });
+
+    // الإصدار 4: أضف جدول قبور لتتبع السجلات المحذوفة ومنع إعادة ظهورها بعد المزامنة
+    this.version(4).stores({
+      products: "id, sku, name, categoryId, brand, model, stock, updatedAt, syncStatus, remoteId",
+      categories: "id, name, updatedAt, syncStatus, remoteId",
+      customers: "id, name, phone, updatedAt, syncStatus, remoteId, deletedAt",
+      invoices: "id, number, customerId, createdAt, status, syncStatus, remoteId",
+      returns: "id, number, invoiceId, createdAt, syncStatus, remoteId",
+      movements: "id, productId, type, createdAt, refId, syncStatus, remoteId",
+      payments: "id, invoiceId, customerId, createdAt, syncStatus, remoteId",
+      settings: "id",
+
+      product_batches: "id, productId, product_id, batch_name, remaining_quantity, expiry_date, is_active, updated_at, syncStatus, remoteId",
+      product_prices: "id, productId, product_id, price, type, isActive, is_active, effective_from, effective_to, syncStatus, remoteId",
+      batch_sale_items: "id, sale_item_id, batch_id, quantity_sold, syncStatus, remoteId",
+      credit_payments: "id, credit_id, amount, payment_method, created_at, syncStatus, remoteId",
+      customer_credits: "id, customer_id, sale_id, total_amount, paid_amount, remaining_amount, status, updated_at, syncStatus, remoteId",
+      app_settings: "id, key, value, updated_at, syncStatus, remoteId",
+      activity_log: "id, user_id, activity_type, table_name, record_id, created_at, syncStatus, remoteId",
+      user_profiles: "id, username, full_name, role, is_active, last_login, syncStatus, remoteId",
+      tombstones: "id, table, remoteId, deletedAt",
     });
   }
 }
