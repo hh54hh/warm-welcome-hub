@@ -40,6 +40,70 @@ export async function searchProducts(q: string) {
   );
 }
 
+async function upsertLocalPriceRecords(productId: string, costPrice: number, salePrice: number) {
+  const ts = now();
+  // ابحث عن سجلات الأسعار المحلية لهذا المنتج
+  const existing = await db.product_prices.where('productId').equals(productId).toArray();
+
+  const findByType = (type: string) => existing.find((p) => p.type === type);
+
+  // سعر الشراء
+  if (costPrice !== undefined && costPrice !== null) {
+    const purchase = findByType('شراء');
+    if (purchase) {
+      if (purchase.price !== costPrice) {
+        await db.product_prices.update(purchase.id, {
+          price: costPrice,
+          isActive: true,
+          updatedAt: ts,
+          syncStatus: "local",
+        });
+      }
+    } else {
+      await db.product_prices.add({
+        id: uid(),
+        productId,
+        price: costPrice,
+        type: 'شراء',
+        isActive: true,
+        effectiveFrom: ts,
+        quantity: 0,
+        createdAt: ts,
+        updatedAt: ts,
+        syncStatus: "local",
+      } as any);
+    }
+  }
+
+  // سعر البيع
+  if (salePrice !== undefined && salePrice !== null) {
+    const selling = findByType('بيع');
+    if (selling) {
+      if (selling.price !== salePrice) {
+        await db.product_prices.update(selling.id, {
+          price: salePrice,
+          isActive: true,
+          updatedAt: ts,
+          syncStatus: "local",
+        });
+      }
+    } else {
+      await db.product_prices.add({
+        id: uid(),
+        productId,
+        price: salePrice,
+        type: 'بيع',
+        isActive: true,
+        effectiveFrom: ts,
+        quantity: 0,
+        createdAt: ts,
+        updatedAt: ts,
+        syncStatus: "local",
+      } as any);
+    }
+  }
+}
+
 export async function createProduct(
   data: Omit<Product, "id" | "createdAt" | "updatedAt" | "syncStatus">,
 ) {
@@ -51,6 +115,8 @@ export async function createProduct(
     syncStatus: "local",
   };
   await db.products.add(product);
+  // أنشئ سجلات الأسعار محلياً ليتم رفعها للـ product_prices
+  await upsertLocalPriceRecords(product.id, product.costPrice ?? 0, product.salePrice ?? 0);
   // Trigger background sync (non-blocking)
   if (getSupabase()) {
     syncWithSupabase().catch((err) => console.warn("Auto-sync after createProduct failed:", err));
@@ -60,10 +126,15 @@ export async function createProduct(
 
 export async function updateProduct(id: string, patch: Partial<Product>) {
   await db.products.update(id, { ...patch, updatedAt: now(), syncStatus: "local" });
+  const updated = await db.products.get(id);
+  // إذا تغيّر السعر — حدّث سجلات product_prices المحلية أيضاً ليتم رفعها
+  if (updated && (patch.costPrice !== undefined || patch.salePrice !== undefined)) {
+    await upsertLocalPriceRecords(id, updated.costPrice ?? 0, updated.salePrice ?? 0);
+  }
   if (getSupabase()) {
     syncWithSupabase().catch((err) => console.warn("Auto-sync after updateProduct failed:", err));
   }
-  return db.products.get(id);
+  return updated;
 }
 
 export async function deleteProduct(id: string) {
