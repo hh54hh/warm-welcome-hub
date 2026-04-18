@@ -747,8 +747,26 @@ export async function pullFromSupabase() {
     if (customersError) {
       errors.push(`Customers sync error: ${customersError.message}`);
     } else if (customers) {
+      // اجلب جميع القبور للزبائن لمنع إعادة إنشاء المحذوفين
+      const customerTombstones = await (db as any).tombstones
+        .where("table")
+        .equals("customers")
+        .toArray();
+      const tombstonedRemoteIds = new Set(
+        customerTombstones
+          .map((t: any) => (t.remoteId ? t.remoteId.toString() : null))
+          .filter(Boolean),
+      );
+
       for (const customer of customers) {
-        const existingCustomer = await db.customers.where('remoteId').equals(customer.id.toString()).first();
+        const remoteIdStr = customer.id.toString();
+
+        // تخطّى أي زبون لديه قبر — تم حذفه محلياً ويجب ألا يعود
+        if (tombstonedRemoteIds.has(remoteIdStr)) {
+          continue;
+        }
+
+        const existingCustomer = await db.customers.where('remoteId').equals(remoteIdStr).first();
         if (existingCustomer?.deletedAt) continue;
         // Skip customers that have local pending changes
         if (existingCustomer && existingCustomer.syncStatus && existingCustomer.syncStatus !== "synced") {
@@ -768,14 +786,14 @@ export async function pullFromSupabase() {
           createdAt: new Date(customer.created_at).getTime(),
           updatedAt: new Date(customer.updated_at).getTime(),
           syncStatus: "synced" as const,
-          remoteId: customer.id.toString(),
+          remoteId: remoteIdStr,
         };
 
         if (existingCustomer) {
           await db.customers.update(existingCustomer.id, customerData);
         } else {
           await db.customers.put({
-            id: customer.id.toString(),
+            id: remoteIdStr,
             ...customerData,
           });
         }
