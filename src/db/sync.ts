@@ -212,13 +212,7 @@ export async function syncWithSupabase(): Promise<SyncResult> {
   let syncedCount = 0;
 
   try {
-    // 1. تحميل التحديثات من Supabase أولاً
-    const pullResult = await pullFromSupabase();
-    if (!pullResult.success) {
-      errors.push(...(pullResult.errors || []));
-    }
-
-    // 2. رفع السجلات المعلقة
+    // 1. ادفع السجلات المعلقة (خاصة الحذف) أولاً قبل السحب لتجنب التعارض
     const pendingRecords = await getPendingRecords();
     console.log(`🔁 هناك ${pendingRecords.length} سجل (سجلات) في قائمة الانتظار للمزامنة.`);
     if (pendingRecords.length > 0) {
