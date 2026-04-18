@@ -185,8 +185,10 @@ async function transformRecordForSupabase(tableName: string, record: any): Promi
     }
 
     default:
-      if (numericId !== undefined) {
-        baseRecord.id = numericId;
+      if (remoteId !== undefined) {
+        baseRecord.id = remoteId;
+      } else if (typeof recordId === "number") {
+        baseRecord.id = recordId;
       } else {
         delete baseRecord.id;
       }
@@ -233,7 +235,8 @@ export async function syncWithSupabase(): Promise<SyncResult> {
         : await supabase.from(supabaseTable).insert(transformedRecord);
 
       const error = response.error;
-      const returnedData = Array.isArray(response.data) ? response.data[0] : response.data;
+      const responseData: any = response.data;
+      const returnedData = Array.isArray(responseData) ? responseData[0] : responseData;
       const remoteId = returnedData?.id ? returnedData.id.toString() : undefined;
 
       if (error) {
