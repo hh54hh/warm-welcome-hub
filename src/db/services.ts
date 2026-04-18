@@ -367,6 +367,139 @@ export async function getCustomerBalance(customerId: string) {
   return invoices.reduce((sum, inv) => sum + (inv.total - inv.paid), 0);
 }
 
+/**
+ * تسديد دين الزبون (كامل أو جزئي) — توزيع دقيق على الديون المفتوحة بالأقدمية (FIFO)
+ * - يحدّث customer_credits محلياً (paid_amount / remaining_amount / status)
+ * - يضيف سجلات credit_payments محلية لكل توزيع
+ * - يضيف سجل دفع عام في payments
+ * - يحدّث inv.paid في الفواتير المرتبطة بحدود الدين
+ * - يدفع للسحابة في الخلفية (إن توفّرت)
+ * يعيد: { applied, remainingChange } applied = ما تم تسديده فعلياً
+ */
+export async function payCustomerCredit(input: {
+  customerId: string;
+  amount: number;
+  method?: PaymentMethod;
+  note?: string;
+}): Promise<{ applied: number; remainingChange: number; closedCount: number }> {
+  const amount = Math.max(0, Math.round(Number(input.amount) || 0));
+  if (amount <= 0) throw new Error("المبلغ غير صالح");
+  if (!input.customerId) throw new Error("الزبون غير محدد");
+
+  const method: PaymentMethod = input.method ?? "cash";
+  const ts = now();
+
+  const result = await db.transaction(
+    "rw",
+    [db.customer_credits, db.credit_payments, db.payments, db.invoices],
+    async () => {
+      // اجلب الديون المفتوحة بالأقدمية
+      const credits = await db.customer_credits
+        .where("customer_id")
+        .equals(input.customerId)
+        .toArray();
+
+      const open = credits
+        .filter((c: any) => Number(c.remaining_amount || 0) > 0)
+        .sort((a: any, b: any) => {
+          const ta = new Date(a.created_at || 0).getTime();
+          const tb = new Date(b.created_at || 0).getTime();
+          return ta - tb;
+        });
+
+      let remaining = amount;
+      let closedCount = 0;
+
+      for (const credit of open) {
+        if (remaining <= 0) break;
+        const due = Math.max(0, Number(credit.remaining_amount || 0));
+        if (due <= 0) continue;
+        const pay = Math.min(due, remaining);
+
+        const newPaid = Math.round(Number(credit.paid_amount || 0) + pay);
+        const newRemaining = Math.round(due - pay);
+        const newStatus = newRemaining <= 0 ? "مدفوع بالكامل" : "مدفوع جزئياً";
+        if (newRemaining <= 0) closedCount++;
+
+        await db.customer_credits.update(credit.id, {
+          paid_amount: newPaid,
+          remaining_amount: newRemaining,
+          status: newStatus,
+          updated_at: new Date().toISOString(),
+          syncStatus: "local",
+        } as any);
+
+        // سجل دفعة في credit_payments
+        await db.credit_payments.add({
+          id: uid(),
+          credit_id: credit.id,
+          amount: pay,
+          payment_method: method,
+          notes: input.note,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          syncStatus: "local",
+        } as any);
+
+        // حدّث الفاتورة المرتبطة (إن وُجدت محلياً) — رفع inv.paid بحدود total
+        if (credit.sale_id) {
+          const linkedInvoices = await db.invoices
+            .where("customerId")
+            .equals(input.customerId)
+            .toArray();
+          // اختر الفاتورة التي remoteId يطابق sale_id إن وُجدت، وإلا fallback
+          const inv = linkedInvoices.find(
+            (i) => i.remoteId?.toString() === credit.sale_id?.toString(),
+          );
+          if (inv) {
+            const cap = Math.max(0, inv.total - inv.paid);
+            const addPaid = Math.min(cap, pay);
+            if (addPaid > 0) {
+              await db.invoices.update(inv.id, {
+                paid: Math.round(inv.paid + addPaid),
+                updatedAt: now(),
+                syncStatus: "local",
+              });
+            }
+          }
+        }
+
+        remaining -= pay;
+      }
+
+      const applied = amount - remaining;
+
+      // سجل دفع عام
+      if (applied > 0) {
+        await db.payments.add({
+          id: uid(),
+          customerId: input.customerId,
+          method,
+          amount: applied,
+          currency: "د.ع",
+          status: "completed",
+          note: input.note ?? "تسديد دين زبون",
+          paidAt: ts,
+          createdAt: ts,
+          updatedAt: ts,
+          syncStatus: "local",
+        } as PaymentRecord);
+      }
+
+      return { applied, remainingChange: remaining, closedCount };
+    },
+  );
+
+  // مزامنة في الخلفية
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) =>
+      console.warn("Auto-sync after payCustomerCredit failed:", err),
+    );
+  }
+
+  return result;
+}
+
 /* ========== الفواتير ========== */
 export interface CreateInvoiceInput {
   items: InvoiceItem[];
