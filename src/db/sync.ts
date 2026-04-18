@@ -276,7 +276,7 @@ export async function syncWithSupabase(): Promise<SyncResult> {
       if (!supabaseTable) return;
 
       const transformedRecord = await transformRecordForSupabase(table, record);
-      const hasNumericId = transformedRecord.id !== undefined;
+      const hasNumericId = transformedRecord.id !== undefined && transformedRecord.id !== null;
       const response = hasNumericId
         ? await supabase.from(supabaseTable).upsert(transformedRecord, { onConflict: "id" }).select()
         : await supabase.from(supabaseTable).insert(transformedRecord).select();
