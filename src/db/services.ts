@@ -553,15 +553,23 @@ export async function pullFromSupabase() {
       for (const product of products) {
         const existingProduct = await db.products.where('remoteId').equals(product.id.toString()).first();
 
+        // CRITICAL: never overwrite local records that have unpushed changes
+        if (existingProduct && existingProduct.syncStatus && existingProduct.syncStatus !== "synced") {
+          continue;
+        }
+
         const productData = {
           name: product.name,
           sku: product.barcode || product.id.toString(),
           categoryId: product.category?.toString(),
-          costPrice: product.purchase_price || 0,
-          salePrice: product.selling_price || 0,
+          costPrice: existingProduct?.costPrice ?? 0, // prices live in product_prices; keep local
+          salePrice: existingProduct?.salePrice ?? 0,
           stock: product.quantity || 0,
           minStock: product.minimum_stock || product.min_stock || 10,
           notes: product.description,
+          unit: existingProduct?.unit,
+          brand: existingProduct?.brand,
+          model: existingProduct?.model,
           createdAt: new Date(product.created_at).getTime(),
           updatedAt: new Date(product.updated_at).getTime(),
           syncStatus: "synced" as const,
@@ -569,10 +577,8 @@ export async function pullFromSupabase() {
         };
 
         if (existingProduct) {
-          // Update existing local record
           await db.products.update(existingProduct.id, productData);
         } else {
-          // Add new record
           await db.products.put({
             id: product.id.toString(),
             ...productData,
@@ -591,8 +597,16 @@ export async function pullFromSupabase() {
     } else if (customers) {
       for (const customer of customers) {
         const existingCustomer = await db.customers.where('remoteId').equals(customer.id.toString()).first();
-        if (existingCustomer?.deletedAt) {
-          // Skip customers that are deleted locally
+        if (existingCustomer?.deletedAt) continue;
+        // Skip customers that have local pending changes
+        if (existingCustomer && existingCustomer.syncStatus && existingCustomer.syncStatus !== "synced") {
+          continue;
+        }
+        // Skip inactive customers from the cloud (treated as deleted)
+        if (customer.is_active === false) {
+          if (existingCustomer && !existingCustomer.deletedAt) {
+            await db.customers.delete(existingCustomer.id);
+          }
           continue;
         }
 
@@ -606,10 +620,8 @@ export async function pullFromSupabase() {
         };
 
         if (existingCustomer) {
-          // Update existing local record
           await db.customers.update(existingCustomer.id, customerData);
         } else {
-          // Add new record
           await db.customers.put({
             id: customer.id.toString(),
             ...customerData,
