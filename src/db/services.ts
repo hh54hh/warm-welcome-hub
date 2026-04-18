@@ -613,14 +613,27 @@ export async function pullFromSupabase() {
   try {
     const errors: string[] = [];
 
-    // تحميل المنتجات
+    // تحميل المنتجات النشطة فقط — تجاهل المحذوف ناعمياً
     const { data: products, error: productsError } = await supabaseClient
       .from("products")
-      .select("*");
+      .select("*")
+      .eq("is_active", true);
 
     if (productsError) {
       errors.push(`Products sync error: ${productsError.message}`);
     } else if (products) {
+      const activeRemoteIds = new Set(products.map((p: any) => p.id.toString()));
+
+      // أزل محلياً أي منتج يحمل remoteId لكنه لم يعد نشطاً في السحابة (محذوف)
+      const allLocal = await db.products.toArray();
+      for (const local of allLocal) {
+        if (!local.remoteId) continue;
+        if (local.syncStatus && local.syncStatus !== "synced") continue; // فيه تغييرات معلّقة
+        if (!activeRemoteIds.has(local.remoteId.toString())) {
+          await db.products.delete(local.id);
+        }
+      }
+
       for (const product of products) {
         const existingProduct = await db.products.where('remoteId').equals(product.id.toString()).first();
 

@@ -76,7 +76,11 @@ const Inventory = () => {
   const [adjustNote, setAdjustNote] = useState("");
 
   const products = useLiveQuery(() =>
-    db.products.orderBy("updatedAt").reverse().toArray(),
+    db.products
+      .orderBy("updatedAt")
+      .reverse()
+      .toArray()
+      .then((list) => list.filter((p) => !p.deletedAt && p.syncStatus !== "deleted")),
   );
 
   const filtered = useMemo(() => {
