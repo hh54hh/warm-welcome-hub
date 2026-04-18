@@ -115,6 +115,7 @@ export async function createProduct(
     syncStatus: "local",
   };
   await db.products.add(product);
+<<<<<<< HEAD
   // If we have Supabase configured, try to sync this new product first so it receives a remote id
   if (getSupabase()) {
     try {
@@ -124,6 +125,8 @@ export async function createProduct(
     }
   }
 
+=======
+>>>>>>> 67ceac65d99d23754b1198076a09e0bbc6fc4b51
   // أنشئ سجلات الأسعار محلياً ليتم رفعها للـ product_prices
   await upsertLocalPriceRecords(product.id, product.costPrice ?? 0, product.salePrice ?? 0);
   // Trigger background sync (non-blocking)
