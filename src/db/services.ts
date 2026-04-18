@@ -642,12 +642,27 @@ export async function pullFromSupabase() {
           continue;
         }
 
+        // ابحث عن أحدث الأسعار محلياً لهذا المنتج (مفهرسة بـ productId المحلي)
+        let bestCost = existingProduct?.costPrice ?? 0;
+        let bestSale = existingProduct?.salePrice ?? 0;
+        if (existingProduct) {
+          const localPrices = await db.product_prices
+            .where('productId').equals(existingProduct.id).toArray();
+          for (const pr of localPrices) {
+            if (pr.isActive === false) continue;
+            const v = Number(pr.price) || 0;
+            if (!v) continue;
+            if (pr.type === 'شراء' || pr.type === 'purchase') bestCost = v;
+            else if (pr.type === 'بيع' || pr.type === 'selling') bestSale = v;
+          }
+        }
+
         const productData = {
           name: product.name,
           sku: product.barcode || product.id.toString(),
           categoryId: product.category?.toString(),
-          costPrice: existingProduct?.costPrice ?? 0, // prices live in product_prices; keep local
-          salePrice: existingProduct?.salePrice ?? 0,
+          costPrice: bestCost, // محفوظة من المحلي + product_prices
+          salePrice: bestSale,
           stock: product.quantity || 0,
           minStock: product.minimum_stock || product.min_stock || 10,
           notes: product.description,
