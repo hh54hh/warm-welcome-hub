@@ -143,6 +143,9 @@ export async function createCustomer(
     syncStatus: "local",
   };
   await db.customers.add(customer);
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after createCustomer failed:", err));
+  }
   return customer;
 }
 
