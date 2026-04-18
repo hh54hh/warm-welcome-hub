@@ -376,7 +376,12 @@ export async function syncWithSupabase(): Promise<SyncResult> {
     for (const { table, record } of activeRecords) {
       try {
         await syncRecord(table, record);
-      } catch (err) {
+      } catch (err: any) {
+        // تخطي صامت إذا كان السبب أن المنتج لم يُزامَن بعد — سيُعاد في الدورة التالية
+        if (err?.message === "PRODUCT_NOT_SYNCED_YET" || /PRODUCT_NOT_SYNCED_YET/.test(String(err))) {
+          console.log(`⏸️ تأجيل مزامنة ${table} record ${record.id} حتى مزامنة المنتج`);
+          continue;
+        }
         errors.push(`Failed to sync ${table} record ${record.id}: ${err}`);
       }
     }
