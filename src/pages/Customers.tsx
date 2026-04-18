@@ -141,9 +141,9 @@ const Customers = () => {
               <div className="flex items-center gap-2">
                 <div className="font-semibold truncate">{c.name ?? "زبون"}</div>
                 {c.syncStatus === "synced" ? (
-                  <CheckCircle className="h-4 w-4 text-green-500 flex-shrink-0" title="متزامن" />
+                  <span title="متزامن" className="inline-flex"><CheckCircle className="h-4 w-4 text-green-500 flex-shrink-0" /></span>
                 ) : (
-                  <Loader className="h-4 w-4 text-blue-500 animate-spin flex-shrink-0" title="قيد المزامنة" />
+                  <span title="قيد المزامنة" className="inline-flex"><Loader className="h-4 w-4 text-blue-500 animate-spin flex-shrink-0" /></span>
                 )}
               </div>
               {c.phone && <div className="text-xs text-muted-foreground nums">{c.phone}</div>}

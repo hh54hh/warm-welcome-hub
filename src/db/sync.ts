@@ -115,15 +115,15 @@ async function transformRecordForSupabase(tableName: string, record: any): Promi
   switch (tableName) {
     case "products": {
       const categoryText = await resolveCategoryText(record.categoryId);
+      // Schema: name, quantity, description, barcode, category, minimum_stock, is_active
       const payload: any = {
         name: record.name,
-        barcode: record.sku,
+        barcode: record.sku || null,
         category: categoryText,
-        quantity: record.stock || 0,
-        purchase_price: record.costPrice || 0,
-        selling_price: record.salePrice || 0,
-        min_stock: record.minStock || 10,
+        quantity: Math.max(0, Math.floor(record.stock || 0)),
+        minimum_stock: Math.max(0, Math.floor(record.minStock || 10)),
         description: record.notes || null,
+        is_active: true,
         created_at: baseRecord.created_at,
         updated_at: baseRecord.updated_at,
       };
@@ -133,14 +133,17 @@ async function transformRecordForSupabase(tableName: string, record: any): Promi
     }
 
     case "customers": {
+      // Schema: name (non-empty), phone (non-empty), is_active
+      const phone = (record.phone && record.phone.trim()) ? record.phone.trim() : "غير محدد";
       const payload: any = {
         name: record.name,
-        phone: record.phone || "",
+        phone,
         is_active: true,
         created_at: baseRecord.created_at,
         updated_at: baseRecord.updated_at,
       };
-      if (recordId !== undefined) payload.id = recordId;
+      if (remoteId !== undefined) payload.id = remoteId;
+      else if (typeof recordId === "number") payload.id = recordId;
       return payload;
     }
 
@@ -185,8 +188,10 @@ async function transformRecordForSupabase(tableName: string, record: any): Promi
     }
 
     default:
-      if (numericId !== undefined) {
-        baseRecord.id = numericId;
+      if (remoteId !== undefined) {
+        baseRecord.id = remoteId;
+      } else if (typeof recordId === "number") {
+        baseRecord.id = recordId;
       } else {
         delete baseRecord.id;
       }
@@ -229,11 +234,12 @@ export async function syncWithSupabase(): Promise<SyncResult> {
       const transformedRecord = await transformRecordForSupabase(table, record);
       const hasNumericId = transformedRecord.id !== undefined;
       const response = hasNumericId
-        ? await supabase.from(supabaseTable).upsert(transformedRecord, { onConflict: "id" })
-        : await supabase.from(supabaseTable).insert(transformedRecord);
+        ? await supabase.from(supabaseTable).upsert(transformedRecord, { onConflict: "id" }).select()
+        : await supabase.from(supabaseTable).insert(transformedRecord).select();
 
       const error = response.error;
-      const returnedData = Array.isArray(response.data) ? response.data[0] : response.data;
+      const responseData: any = response.data;
+      const returnedData = Array.isArray(responseData) ? responseData[0] : responseData;
       const remoteId = returnedData?.id ? returnedData.id.toString() : undefined;
 
       if (error) {
@@ -247,14 +253,14 @@ export async function syncWithSupabase(): Promise<SyncResult> {
           message: error.message,
           status: response.status,
           data: response.data,
-          hint: response.error?.hint,
-          details: response.error?.details,
+          hint: (response.error as any)?.hint,
+          details: (response.error as any)?.details,
           transformedRecord,
         });
       } else {
         await markRecordsSynced(table, [record.id], remoteId ? { [record.id]: remoteId } : undefined);
         syncedCount++;
-        console.log(`✅ تم مزامنة ${table} record ${record.id}`);
+        console.log(`✅ تم مزامنة ${table} record ${record.id}`, remoteId ? `(remote id: ${remoteId})` : "");
       }
     };
 

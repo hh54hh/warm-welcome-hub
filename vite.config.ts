@@ -18,8 +18,8 @@ export default defineConfig(({ mode }) => ({
     mode === "development" && componentTagger(),
     {
       name: "copy-pwa-files",
-      apply: "build",
-      enforce: "post",
+      apply: "build" as const,
+      enforce: "post" as const,
       generateBundle() {
         const files = ["manifest.json", "service-worker.js", "icon-192.png", "icon-512.png"];
         mkdirSync("dist", { recursive: true });

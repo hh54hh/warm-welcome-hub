@@ -51,6 +51,10 @@ export async function createProduct(
     syncStatus: "local",
   };
   await db.products.add(product);
+  // Trigger background sync (non-blocking)
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after createProduct failed:", err));
+  }
   return product;
 }
 
@@ -139,6 +143,9 @@ export async function createCustomer(
     syncStatus: "local",
   };
   await db.customers.add(customer);
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after createCustomer failed:", err));
+  }
   return customer;
 }
 
@@ -509,11 +516,11 @@ export async function pullFromSupabase() {
           costPrice: product.purchase_price || 0,
           salePrice: product.selling_price || 0,
           stock: product.quantity || 0,
-          minStock: product.min_stock || 10,
+          minStock: product.minimum_stock || product.min_stock || 10,
           notes: product.description,
           createdAt: new Date(product.created_at).getTime(),
           updatedAt: new Date(product.updated_at).getTime(),
-          syncStatus: "synced",
+          syncStatus: "synced" as const,
           remoteId: product.id.toString(),
         };
 
@@ -550,7 +557,7 @@ export async function pullFromSupabase() {
           phone: customer.phone,
           createdAt: new Date(customer.created_at).getTime(),
           updatedAt: new Date(customer.updated_at).getTime(),
-          syncStatus: "synced",
+          syncStatus: "synced" as const,
           remoteId: customer.id.toString(),
         };
 
@@ -588,7 +595,7 @@ export async function pullFromSupabase() {
           description: category.description || "",
           createdAt: new Date(category.created_at).getTime(),
           updatedAt: new Date(category.updated_at).getTime(),
-          syncStatus: "synced",
+          syncStatus: "synced" as const,
           remoteId: category.id.toString(),
         };
 
@@ -642,10 +649,10 @@ export async function pullFromSupabase() {
           customerId: sale.customer_id?.toString(),
           customerName: sale.customer_name,
           customerPhone: sale.customer_phone,
-          status: "completed",
+          status: "completed" as const,
           createdAt: new Date(sale.created_at).getTime(),
           updatedAt: new Date(sale.updated_at).getTime(),
-          syncStatus: "synced",
+          syncStatus: "synced" as const,
           remoteId: sale.id.toString(),
         };
 
