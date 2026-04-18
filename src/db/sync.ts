@@ -212,13 +212,7 @@ export async function syncWithSupabase(): Promise<SyncResult> {
   let syncedCount = 0;
 
   try {
-    // 1. تحميل التحديثات من Supabase أولاً
-    const pullResult = await pullFromSupabase();
-    if (!pullResult.success) {
-      errors.push(...(pullResult.errors || []));
-    }
-
-    // 2. رفع السجلات المعلقة
+    // 1. ادفع السجلات المعلقة (خاصة الحذف) أولاً قبل السحب لتجنب التعارض
     const pendingRecords = await getPendingRecords();
     console.log(`🔁 هناك ${pendingRecords.length} سجل (سجلات) في قائمة الانتظار للمزامنة.`);
     if (pendingRecords.length > 0) {
@@ -268,37 +262,54 @@ export async function syncWithSupabase(): Promise<SyncResult> {
       const supabaseTable = SYNC_TABLES.find((t) => t.name === table)?.supabaseTable;
       if (!supabaseTable) return;
 
+      const target = (db as any)[table];
       const remoteKey = normalizeId(record.remoteId ?? record.id);
+
+      // No remote id — just remove locally
       if (remoteKey === undefined) {
-        await markRecordsSynced(table, [record.id]);
+        if (target) await target.delete(record.id);
         syncedCount++;
+        console.log(`🗑️ تم حذف ${table} record ${record.id} محلياً (بدون معرف بعيد)`);
         return;
       }
 
-      const { error } = await supabase.from(supabaseTable).delete().eq("id", remoteKey);
+      // Try DELETE first; if FK constraint blocks it, fall back to soft delete via is_active=false
+      let { error } = await supabase.from(supabaseTable).delete().eq("id", remoteKey);
+
       if (error) {
         const missingRelation = /(relation ".*" does not exist|missing relation)/i.test(error.message || "");
         if (missingRelation) {
           console.warn(`Skipping delete sync for ${table} because remote table ${supabaseTable} does not exist: ${error.message}`);
-          await markRecordsSynced(table, [record.id]);
+          if (target) await target.delete(record.id);
           syncedCount++;
           return;
         }
+
+        // Foreign key violation — soft-delete remotely instead
+        const fkConflict = /(foreign key|violates foreign key constraint|conflict)/i.test(error.message || "");
+        if (fkConflict && (table === "customers" || table === "products" || table === "categories")) {
+          const softPayload: any = { is_active: false, updated_at: new Date().toISOString() };
+          const softResult = await supabase.from(supabaseTable).update(softPayload).eq("id", remoteKey);
+          if (!softResult.error) {
+            if (target) await target.delete(record.id);
+            syncedCount++;
+            console.log(`🗑️ تم تعطيل ${table} record ${record.id} (soft delete remote, FK محمي)`);
+            return;
+          }
+          error = softResult.error;
+        }
+
         errors.push(`Error deleting ${table} record ${record.id}: ${error.message}`);
+        console.error(`❌ فشل حذف ${table} record ${record.id}:`, error);
       } else {
-        await markRecordsSynced(table, [record.id]);
+        // Success — physically remove from local DB
+        if (target) await target.delete(record.id);
         syncedCount++;
+        console.log(`🗑️ تم حذف ${table} record ${record.id} من السحابة والمحلي`);
       }
     };
 
-    for (const { table, record } of activeRecords) {
-      try {
-        await syncRecord(table, record);
-      } catch (err) {
-        errors.push(`Failed to sync ${table} record ${record.id}: ${err}`);
-      }
-    }
-
+    // 2. عالج عمليات الحذف أولاً قبل الـ upserts و الـ pull
     for (const { table, record } of deletedRecords.sort((a, b) => {
       const indexA = SYNC_TABLES.findIndex((t) => t.name === a.table);
       const indexB = SYNC_TABLES.findIndex((t) => t.name === b.table);
@@ -309,6 +320,21 @@ export async function syncWithSupabase(): Promise<SyncResult> {
       } catch (err) {
         errors.push(`Failed to delete ${table} record ${record.id}: ${err}`);
       }
+    }
+
+    // 3. ارفع السجلات النشطة (إنشاء/تحديث)
+    for (const { table, record } of activeRecords) {
+      try {
+        await syncRecord(table, record);
+      } catch (err) {
+        errors.push(`Failed to sync ${table} record ${record.id}: ${err}`);
+      }
+    }
+
+    // 4. اسحب التحديثات من Supabase أخيراً
+    const pullResult = await pullFromSupabase();
+    if (!pullResult.success) {
+      errors.push(...(pullResult.errors || []));
     }
 
     return {

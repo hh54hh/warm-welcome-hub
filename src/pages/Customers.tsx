@@ -26,7 +26,10 @@ const Customers = () => {
   const [active, setActive] = useState<CustomerSummary | null>(null);
   const [printStatement, setPrintStatement] = useState<CustomerSummary | null>(null);
 
-  const customers = useLiveQuery(() => db.customers.orderBy("name").toArray(), []);
+  const customers = useLiveQuery(
+    () => db.customers.orderBy("name").toArray().then((list) => list.filter((c) => !c.deletedAt && c.syncStatus !== "deleted")),
+    []
+  );
   const invoices = useLiveQuery(() => db.invoices.toArray(), []);
   const customerCredits = useLiveQuery(() => db.customer_credits.toArray(), []);
 
