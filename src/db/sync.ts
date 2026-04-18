@@ -234,8 +234,8 @@ export async function syncWithSupabase(): Promise<SyncResult> {
       const transformedRecord = await transformRecordForSupabase(table, record);
       const hasNumericId = transformedRecord.id !== undefined;
       const response = hasNumericId
-        ? await supabase.from(supabaseTable).upsert(transformedRecord, { onConflict: "id" })
-        : await supabase.from(supabaseTable).insert(transformedRecord);
+        ? await supabase.from(supabaseTable).upsert(transformedRecord, { onConflict: "id" }).select()
+        : await supabase.from(supabaseTable).insert(transformedRecord).select();
 
       const error = response.error;
       const responseData: any = response.data;
@@ -253,14 +253,14 @@ export async function syncWithSupabase(): Promise<SyncResult> {
           message: error.message,
           status: response.status,
           data: response.data,
-          hint: response.error?.hint,
-          details: response.error?.details,
+          hint: (response.error as any)?.hint,
+          details: (response.error as any)?.details,
           transformedRecord,
         });
       } else {
         await markRecordsSynced(table, [record.id], remoteId ? { [record.id]: remoteId } : undefined);
         syncedCount++;
-        console.log(`✅ تم مزامنة ${table} record ${record.id}`);
+        console.log(`✅ تم مزامنة ${table} record ${record.id}`, remoteId ? `(remote id: ${remoteId})` : "");
       }
     };
 
