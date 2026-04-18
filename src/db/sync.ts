@@ -250,16 +250,25 @@ async function transformRecordForSupabase(tableName: string, record: any): Promi
 }
 
 // مزامنة البيانات مع Supabase
+// قفل لمنع تشغيل مزامنات متوازية تؤدي لسباق وكتابة بيانات قديمة فوق الجديدة
+let syncInFlight: Promise<SyncResult> | null = null;
+
 export async function syncWithSupabase(): Promise<SyncResult> {
   const supabase = getSupabase();
   if (!supabase) {
     return { success: false, errors: ["Supabase client not configured"] };
   }
 
-  console.log("🔄 بدء المزامنة مع Supabase...");
+  // إذا كانت هناك مزامنة جارية، أرجع نفس الـ Promise بدلاً من تشغيل واحدة جديدة
+  if (syncInFlight) {
+    return syncInFlight;
+  }
 
-  const errors: string[] = [];
-  let syncedCount = 0;
+  syncInFlight = (async (): Promise<SyncResult> => {
+    console.log("🔄 بدء المزامنة مع Supabase...");
+
+    const errors: string[] = [];
+    let syncedCount = 0;
 
   try {
     // 1. ادفع السجلات المعلقة (خاصة الحذف) أولاً قبل السحب لتجنب التعارض
