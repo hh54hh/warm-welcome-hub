@@ -808,32 +808,40 @@ export async function pullFromSupabase() {
       }
 
       // تحديث أسعار المنتجات في جدول products بناءً على product_prices
+      // ملاحظة: نستخدم remoteId للبحث لأن الـ id المحلي عبارة عن UUID للمنتجات الجديدة
       const productPriceMap = new Map<string, { purchase: number; selling: number; marketing: number }>();
       for (const price of productPrices) {
-        const productId = price.product_id.toString();
-        if (!productPriceMap.has(productId)) {
-          productPriceMap.set(productId, { purchase: 0, selling: 0, marketing: 0 });
+        const productRemoteId = price.product_id.toString();
+        if (!productPriceMap.has(productRemoteId)) {
+          productPriceMap.set(productRemoteId, { purchase: 0, selling: 0, marketing: 0 });
         }
-        const prices = productPriceMap.get(productId)!;
+        const prices = productPriceMap.get(productRemoteId)!;
+        if (!price.is_active) continue;
         if (price.type === 'بيع' || price.type === 'selling') {
-          prices.selling = price.price;
+          prices.selling = Number(price.price) || prices.selling;
         } else if (price.type === 'شراء' || price.type === 'purchase') {
-          prices.purchase = price.price;
+          prices.purchase = Number(price.price) || prices.purchase;
         } else if (price.type === 'تسويق' || price.type === 'marketing') {
-          prices.marketing = price.price;
+          prices.marketing = Number(price.price) || prices.marketing;
         }
       }
 
-      // تحديث المنتجات بالأسعار الجديدة
-      for (const [productId, prices] of productPriceMap) {
-        const existingProduct = await db.products.get(productId);
-        if (existingProduct) {
-          await db.products.update(productId, {
-            costPrice: prices.purchase,
-            salePrice: prices.selling,
-            updatedAt: Date.now(),
-          });
-        }
+      // تحديث المنتجات بالأسعار الجديدة — البحث بـ remoteId أو id
+      for (const [productRemoteId, prices] of productPriceMap) {
+        // فقط حدّث إذا كانت لدينا أسعار فعلية (تجنب الكتابة فوق المحلي بأصفار)
+        if (prices.purchase === 0 && prices.selling === 0) continue;
+
+        let target = await db.products.where('remoteId').equals(productRemoteId).first();
+        if (!target) target = await db.products.get(productRemoteId);
+        if (!target) continue;
+        // لا تكتب فوق منتج فيه تغييرات محلية معلّقة
+        if (target.syncStatus && target.syncStatus !== "synced") continue;
+
+        await db.products.update(target.id, {
+          costPrice: prices.purchase || target.costPrice || 0,
+          salePrice: prices.selling || target.salePrice || 0,
+          updatedAt: Date.now(),
+        });
       }
     }
 
