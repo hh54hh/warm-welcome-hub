@@ -176,11 +176,18 @@ export async function createCustomer(
 
 export async function updateCustomer(id: string, patch: Partial<Customer>) {
   await db.customers.update(id, { ...patch, updatedAt: now(), syncStatus: "local" });
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after updateCustomer failed:", err));
+  }
   return db.customers.get(id);
 }
 
 export async function deleteCustomer(id: string) {
+  const customer = await db.customers.get(id);
+  if (!customer) return;
+
   await db.transaction("rw", [db.customers, db.invoices, db.payments, db.customer_credits, db.credit_payments], async () => {
+    // Detach customer from invoices and mark them pending so the change is pushed
     await db.invoices.where("customerId").equals(id).modify({
       customerId: undefined,
       customerName: undefined,
@@ -188,14 +195,26 @@ export async function deleteCustomer(id: string) {
       updatedAt: now(),
       syncStatus: "local",
     });
+    // Local-only payment & credit records — local deletes are fine
     await db.payments.where("customerId").equals(id).delete();
     await db.customer_credits.where("customer_id").equals(id).delete();
-    await db.customers.update(id, {
-      syncStatus: "deleted",
-      deletedAt: now(),
-      updatedAt: now(),
-    });
+
+    if (customer.remoteId) {
+      // Soft delete: sync layer will DELETE on Supabase
+      await db.customers.update(id, {
+        syncStatus: "deleted",
+        deletedAt: now(),
+        updatedAt: now(),
+      });
+    } else {
+      // Never synced — just remove locally
+      await db.customers.delete(id);
+    }
   });
+
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after deleteCustomer failed:", err));
+  }
 }
 
 export async function listPayments() {
