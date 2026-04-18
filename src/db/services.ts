@@ -40,6 +40,70 @@ export async function searchProducts(q: string) {
   );
 }
 
+async function upsertLocalPriceRecords(productId: string, costPrice: number, salePrice: number) {
+  const ts = now();
+  // ابحث عن سجلات الأسعار المحلية لهذا المنتج
+  const existing = await db.product_prices.where('productId').equals(productId).toArray();
+
+  const findByType = (type: string) => existing.find((p) => p.type === type);
+
+  // سعر الشراء
+  if (costPrice !== undefined && costPrice !== null) {
+    const purchase = findByType('شراء');
+    if (purchase) {
+      if (purchase.price !== costPrice) {
+        await db.product_prices.update(purchase.id, {
+          price: costPrice,
+          isActive: true,
+          updatedAt: ts,
+          syncStatus: "local",
+        });
+      }
+    } else {
+      await db.product_prices.add({
+        id: uid(),
+        productId,
+        price: costPrice,
+        type: 'شراء',
+        isActive: true,
+        effectiveFrom: ts,
+        quantity: 0,
+        createdAt: ts,
+        updatedAt: ts,
+        syncStatus: "local",
+      } as any);
+    }
+  }
+
+  // سعر البيع
+  if (salePrice !== undefined && salePrice !== null) {
+    const selling = findByType('بيع');
+    if (selling) {
+      if (selling.price !== salePrice) {
+        await db.product_prices.update(selling.id, {
+          price: salePrice,
+          isActive: true,
+          updatedAt: ts,
+          syncStatus: "local",
+        });
+      }
+    } else {
+      await db.product_prices.add({
+        id: uid(),
+        productId,
+        price: salePrice,
+        type: 'بيع',
+        isActive: true,
+        effectiveFrom: ts,
+        quantity: 0,
+        createdAt: ts,
+        updatedAt: ts,
+        syncStatus: "local",
+      } as any);
+    }
+  }
+}
+
 export async function createProduct(
   data: Omit<Product, "id" | "createdAt" | "updatedAt" | "syncStatus">,
 ) {
@@ -51,16 +115,54 @@ export async function createProduct(
     syncStatus: "local",
   };
   await db.products.add(product);
+  // If we have Supabase configured, try to sync this new product first so it receives a remote id
+  if (getSupabase()) {
+    try {
+      await syncWithSupabase();
+    } catch (err) {
+      console.warn("Initial product sync attempt failed:", err);
+    }
+  }
+
+  // أنشئ سجلات الأسعار محلياً ليتم رفعها للـ product_prices
+  await upsertLocalPriceRecords(product.id, product.costPrice ?? 0, product.salePrice ?? 0);
+  // Trigger background sync (non-blocking)
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after createProduct failed:", err));
+  }
   return product;
 }
 
 export async function updateProduct(id: string, patch: Partial<Product>) {
   await db.products.update(id, { ...patch, updatedAt: now(), syncStatus: "local" });
-  return db.products.get(id);
+  const updated = await db.products.get(id);
+  // إذا تغيّر السعر — حدّث سجلات product_prices المحلية أيضاً ليتم رفعها
+  if (updated && (patch.costPrice !== undefined || patch.salePrice !== undefined)) {
+    await upsertLocalPriceRecords(id, updated.costPrice ?? 0, updated.salePrice ?? 0);
+  }
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after updateProduct failed:", err));
+  }
+  return updated;
 }
 
 export async function deleteProduct(id: string) {
-  await db.products.delete(id);
+  // Soft delete so the sync layer can propagate it to Supabase
+  const existing = await db.products.get(id);
+  if (!existing) return;
+  if (existing.remoteId) {
+    await db.products.update(id, {
+      syncStatus: "deleted",
+      deletedAt: now(),
+      updatedAt: now(),
+    });
+    if (getSupabase()) {
+      syncWithSupabase().catch((err) => console.warn("Auto-sync after deleteProduct failed:", err));
+    }
+  } else {
+    // Never reached the cloud, safe to fully remove locally
+    await db.products.delete(id);
+  }
 }
 
 export async function adjustStock(productId: string, delta: number, note?: string) {
@@ -68,7 +170,11 @@ export async function adjustStock(productId: string, delta: number, note?: strin
   if (!p) throw new Error("منتج غير موجود");
   const newStock = p.stock + delta;
   if (newStock < 0) throw new Error("لا توجد كمية كافية في المخزن");
-  await db.products.update(productId, { stock: newStock, updatedAt: now() });
+  await db.products.update(productId, {
+    stock: newStock,
+    updatedAt: now(),
+    syncStatus: "local", // Critical: mark dirty so pull doesn't overwrite
+  });
   await db.movements.add({
     id: uid(),
     productId,
@@ -79,6 +185,9 @@ export async function adjustStock(productId: string, delta: number, note?: strin
     updatedAt: now(),
     syncStatus: "local",
   });
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after adjustStock failed:", err));
+  }
 }
 
 /* ========== الفئات ========== */
@@ -139,31 +248,95 @@ export async function createCustomer(
     syncStatus: "local",
   };
   await db.customers.add(customer);
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after createCustomer failed:", err));
+  }
   return customer;
 }
 
 export async function updateCustomer(id: string, patch: Partial<Customer>) {
   await db.customers.update(id, { ...patch, updatedAt: now(), syncStatus: "local" });
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after updateCustomer failed:", err));
+  }
   return db.customers.get(id);
 }
 
 export async function deleteCustomer(id: string) {
-  await db.transaction("rw", [db.customers, db.invoices, db.payments, db.customer_credits, db.credit_payments], async () => {
-    await db.invoices.where("customerId").equals(id).modify({
-      customerId: undefined,
-      customerName: undefined,
-      customerPhone: undefined,
-      updatedAt: now(),
-      syncStatus: "local",
-    });
-    await db.payments.where("customerId").equals(id).delete();
-    await db.customer_credits.where("customer_id").equals(id).delete();
-    await db.customers.update(id, {
-      syncStatus: "deleted",
-      deletedAt: now(),
-      updatedAt: now(),
-    });
-  });
+  const customer = await db.customers.get(id);
+  if (!customer) return;
+
+  const remoteId = customer.remoteId ? customer.remoteId.toString() : undefined;
+
+  // 1) إزالة فورية من القاعدة المحلية + إنشاء قبر لمنع إعادة الظهور بعد المزامنة
+  await db.transaction(
+    "rw",
+    [db.customers, db.invoices, db.payments, db.customer_credits, db.credit_payments, (db as any).tombstones],
+    async () => {
+      // فصل الزبون عن الفواتير وتحديثها للمزامنة
+      await db.invoices.where("customerId").equals(id).modify({
+        customerId: undefined,
+        customerName: undefined,
+        customerPhone: undefined,
+        updatedAt: now(),
+        syncStatus: "local",
+      });
+      // حذف السجلات المحلية المرتبطة
+      await db.payments.where("customerId").equals(id).delete();
+      await db.customer_credits.where("customer_id").equals(id).delete();
+
+      // أنشئ قبراً (tombstone) قبل الحذف ليتذكر النظام أن هذا الزبون محذوف
+      // حتى لو فشل الحذف على السحابة أو عاد عبر pull لاحقاً
+      if (remoteId) {
+        await (db as any).tombstones.put({
+          id: `customers:${remoteId}`,
+          table: "customers",
+          remoteId,
+          deletedAt: now(),
+        });
+      }
+      await (db as any).tombstones.put({
+        id: `customers:local:${id}`,
+        table: "customers",
+        remoteId,
+        deletedAt: now(),
+      });
+
+      // احذف الزبون فعلياً من المحلي فوراً (UI تتحدث مباشرة)
+      await db.customers.delete(id);
+    },
+  );
+
+  // 2) محاولة الحذف من السحابة في الخلفية (لا يعطل الواجهة)
+  if (remoteId && getSupabase()) {
+    void (async () => {
+      try {
+        const supabase = getSupabase();
+        if (!supabase) return;
+        const numericId = Number(remoteId);
+        const targetId = Number.isFinite(numericId) ? numericId : remoteId;
+
+        // حاول الحذف الكامل أولاً
+        const { error: delError } = await supabase.from("customers").delete().eq("id", targetId);
+        if (delError) {
+          // إن فشل (RLS, FK, أو أي سبب) — جرّب soft delete (is_active = false)
+          const { error: softError } = await supabase
+            .from("customers")
+            .update({ is_active: false, updated_at: new Date().toISOString() })
+            .eq("id", targetId);
+          if (softError) {
+            console.warn(`⚠️ تعذّر حذف الزبون من السحابة (${remoteId}): ${softError.message}. القبر سيمنع عودته محلياً.`);
+          } else {
+            console.log(`🗑️ تم تعطيل الزبون ${remoteId} على السحابة (soft delete)`);
+          }
+        } else {
+          console.log(`🗑️ تم حذف الزبون ${remoteId} من السحابة بالكامل`);
+        }
+      } catch (err) {
+        console.warn(`⚠️ خطأ أثناء حذف الزبون من السحابة:`, err);
+      }
+    })();
+  }
 }
 
 export async function listPayments() {
@@ -201,6 +374,139 @@ export async function createPaymentRecord(input: {
 export async function getCustomerBalance(customerId: string) {
   const invoices = await db.invoices.where("customerId").equals(customerId).toArray();
   return invoices.reduce((sum, inv) => sum + (inv.total - inv.paid), 0);
+}
+
+/**
+ * تسديد دين الزبون (كامل أو جزئي) — توزيع دقيق على الديون المفتوحة بالأقدمية (FIFO)
+ * - يحدّث customer_credits محلياً (paid_amount / remaining_amount / status)
+ * - يضيف سجلات credit_payments محلية لكل توزيع
+ * - يضيف سجل دفع عام في payments
+ * - يحدّث inv.paid في الفواتير المرتبطة بحدود الدين
+ * - يدفع للسحابة في الخلفية (إن توفّرت)
+ * يعيد: { applied, remainingChange } applied = ما تم تسديده فعلياً
+ */
+export async function payCustomerCredit(input: {
+  customerId: string;
+  amount: number;
+  method?: PaymentMethod;
+  note?: string;
+}): Promise<{ applied: number; remainingChange: number; closedCount: number }> {
+  const amount = Math.max(0, Math.round(Number(input.amount) || 0));
+  if (amount <= 0) throw new Error("المبلغ غير صالح");
+  if (!input.customerId) throw new Error("الزبون غير محدد");
+
+  const method: PaymentMethod = input.method ?? "cash";
+  const ts = now();
+
+  const result = await db.transaction(
+    "rw",
+    [db.customer_credits, db.credit_payments, db.payments, db.invoices],
+    async () => {
+      // اجلب الديون المفتوحة بالأقدمية
+      const credits = await db.customer_credits
+        .where("customer_id")
+        .equals(input.customerId)
+        .toArray();
+
+      const open = credits
+        .filter((c: any) => Number(c.remaining_amount || 0) > 0)
+        .sort((a: any, b: any) => {
+          const ta = new Date(a.created_at || 0).getTime();
+          const tb = new Date(b.created_at || 0).getTime();
+          return ta - tb;
+        });
+
+      let remaining = amount;
+      let closedCount = 0;
+
+      for (const credit of open) {
+        if (remaining <= 0) break;
+        const due = Math.max(0, Number(credit.remaining_amount || 0));
+        if (due <= 0) continue;
+        const pay = Math.min(due, remaining);
+
+        const newPaid = Math.round(Number(credit.paid_amount || 0) + pay);
+        const newRemaining = Math.round(due - pay);
+        const newStatus = newRemaining <= 0 ? "مدفوع بالكامل" : "مدفوع جزئياً";
+        if (newRemaining <= 0) closedCount++;
+
+        await db.customer_credits.update(credit.id, {
+          paid_amount: newPaid,
+          remaining_amount: newRemaining,
+          status: newStatus,
+          updated_at: new Date().toISOString(),
+          syncStatus: "local",
+        } as any);
+
+        // سجل دفعة في credit_payments
+        await db.credit_payments.add({
+          id: uid(),
+          credit_id: credit.id,
+          amount: pay,
+          payment_method: method,
+          notes: input.note,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          syncStatus: "local",
+        } as any);
+
+        // حدّث الفاتورة المرتبطة (إن وُجدت محلياً) — رفع inv.paid بحدود total
+        if (credit.sale_id) {
+          const linkedInvoices = await db.invoices
+            .where("customerId")
+            .equals(input.customerId)
+            .toArray();
+          // اختر الفاتورة التي remoteId يطابق sale_id إن وُجدت، وإلا fallback
+          const inv = linkedInvoices.find(
+            (i) => i.remoteId?.toString() === credit.sale_id?.toString(),
+          );
+          if (inv) {
+            const cap = Math.max(0, inv.total - inv.paid);
+            const addPaid = Math.min(cap, pay);
+            if (addPaid > 0) {
+              await db.invoices.update(inv.id, {
+                paid: Math.round(inv.paid + addPaid),
+                updatedAt: now(),
+                syncStatus: "local",
+              });
+            }
+          }
+        }
+
+        remaining -= pay;
+      }
+
+      const applied = amount - remaining;
+
+      // سجل دفع عام
+      if (applied > 0) {
+        await db.payments.add({
+          id: uid(),
+          customerId: input.customerId,
+          method,
+          amount: applied,
+          currency: "د.ع",
+          status: "completed",
+          note: input.note ?? "تسديد دين زبون",
+          paidAt: ts,
+          createdAt: ts,
+          updatedAt: ts,
+          syncStatus: "local",
+        } as PaymentRecord);
+      }
+
+      return { applied, remainingChange: remaining, closedCount };
+    },
+  );
+
+  // مزامنة في الخلفية
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) =>
+      console.warn("Auto-sync after payCustomerCredit failed:", err),
+    );
+  }
+
+  return result;
 }
 
 /* ========== الفواتير ========== */
@@ -491,37 +797,82 @@ export async function pullFromSupabase() {
   try {
     const errors: string[] = [];
 
-    // تحميل المنتجات
+    // تحميل المنتجات النشطة فقط — تجاهل المحذوف ناعمياً
     const { data: products, error: productsError } = await supabaseClient
       .from("products")
-      .select("*");
+      .select("*")
+      .eq("is_active", true);
 
     if (productsError) {
       errors.push(`Products sync error: ${productsError.message}`);
     } else if (products) {
+      const activeRemoteIds = new Set(products.map((p: any) => p.id.toString()));
+
+      // أزل محلياً أي منتج يحمل remoteId لكنه لم يعد نشطاً في السحابة (محذوف)
+      const allLocal = await db.products.toArray();
+      for (const local of allLocal) {
+        if (!local.remoteId) continue;
+        if (local.syncStatus && local.syncStatus !== "synced") continue; // فيه تغييرات معلّقة
+        if (!activeRemoteIds.has(local.remoteId.toString())) {
+          await db.products.delete(local.id);
+        }
+      }
+
       for (const product of products) {
         const existingProduct = await db.products.where('remoteId').equals(product.id.toString()).first();
+
+        // CRITICAL: never overwrite local records that have unpushed changes
+        if (existingProduct && existingProduct.syncStatus && existingProduct.syncStatus !== "synced") {
+          continue;
+        }
+
+        // ابحث عن أحدث الأسعار محلياً لهذا المنتج
+        // المفتاح productId قد يكون UUID المحلي أو remoteId الرقمي للمنتج (بحسب من أنشأ السجل)
+        let bestCost = existingProduct?.costPrice ?? 0;
+        let bestSale = existingProduct?.salePrice ?? 0;
+        if (existingProduct) {
+          const productKeys = new Set<string>();
+          productKeys.add(existingProduct.id);
+          if (existingProduct.remoteId) productKeys.add(existingProduct.remoteId.toString());
+          const allLocalPrices = await db.product_prices.toArray();
+          const localPrices = allLocalPrices.filter((pr: any) => {
+            const pid = pr.productId !== undefined && pr.productId !== null ? pr.productId.toString() : "";
+            const pid2 = pr.product_id !== undefined && pr.product_id !== null ? pr.product_id.toString() : "";
+            return productKeys.has(pid) || productKeys.has(pid2);
+          });
+          for (const pr of localPrices) {
+            if (pr.isActive === false || pr.is_active === false) continue;
+            const v = Number(pr.price) || 0;
+            if (!v) continue;
+            if (pr.type === 'شراء' || pr.type === 'purchase') bestCost = v;
+            else if (pr.type === 'بيع' || pr.type === 'selling') bestSale = v;
+          }
+        }
+        // إذا كانت الأسعار المحلية صفر/مفقودة، حافظ على القيم الموجودة سابقاً
+        if (!bestCost && existingProduct?.costPrice) bestCost = existingProduct.costPrice;
+        if (!bestSale && existingProduct?.salePrice) bestSale = existingProduct.salePrice;
 
         const productData = {
           name: product.name,
           sku: product.barcode || product.id.toString(),
           categoryId: product.category?.toString(),
-          costPrice: product.purchase_price || 0,
-          salePrice: product.selling_price || 0,
+          costPrice: bestCost, // محفوظة من المحلي + product_prices
+          salePrice: bestSale,
           stock: product.quantity || 0,
-          minStock: product.min_stock || 10,
+          minStock: product.minimum_stock || product.min_stock || 10,
           notes: product.description,
+          unit: existingProduct?.unit,
+          brand: existingProduct?.brand,
+          model: existingProduct?.model,
           createdAt: new Date(product.created_at).getTime(),
           updatedAt: new Date(product.updated_at).getTime(),
-          syncStatus: "synced",
+          syncStatus: "synced" as const,
           remoteId: product.id.toString(),
         };
 
         if (existingProduct) {
-          // Update existing local record
           await db.products.update(existingProduct.id, productData);
         } else {
-          // Add new record
           await db.products.put({
             id: product.id.toString(),
             ...productData,
@@ -538,10 +889,36 @@ export async function pullFromSupabase() {
     if (customersError) {
       errors.push(`Customers sync error: ${customersError.message}`);
     } else if (customers) {
+      // اجلب جميع القبور للزبائن لمنع إعادة إنشاء المحذوفين
+      const customerTombstones = await (db as any).tombstones
+        .where("table")
+        .equals("customers")
+        .toArray();
+      const tombstonedRemoteIds = new Set(
+        customerTombstones
+          .map((t: any) => (t.remoteId ? t.remoteId.toString() : null))
+          .filter(Boolean),
+      );
+
       for (const customer of customers) {
-        const existingCustomer = await db.customers.where('remoteId').equals(customer.id.toString()).first();
-        if (existingCustomer?.deletedAt) {
-          // Skip customers that are deleted locally
+        const remoteIdStr = customer.id.toString();
+
+        // تخطّى أي زبون لديه قبر — تم حذفه محلياً ويجب ألا يعود
+        if (tombstonedRemoteIds.has(remoteIdStr)) {
+          continue;
+        }
+
+        const existingCustomer = await db.customers.where('remoteId').equals(remoteIdStr).first();
+        if (existingCustomer?.deletedAt) continue;
+        // Skip customers that have local pending changes
+        if (existingCustomer && existingCustomer.syncStatus && existingCustomer.syncStatus !== "synced") {
+          continue;
+        }
+        // Skip inactive customers from the cloud (treated as deleted)
+        if (customer.is_active === false) {
+          if (existingCustomer && !existingCustomer.deletedAt) {
+            await db.customers.delete(existingCustomer.id);
+          }
           continue;
         }
 
@@ -550,17 +927,15 @@ export async function pullFromSupabase() {
           phone: customer.phone,
           createdAt: new Date(customer.created_at).getTime(),
           updatedAt: new Date(customer.updated_at).getTime(),
-          syncStatus: "synced",
-          remoteId: customer.id.toString(),
+          syncStatus: "synced" as const,
+          remoteId: remoteIdStr,
         };
 
         if (existingCustomer) {
-          // Update existing local record
           await db.customers.update(existingCustomer.id, customerData);
         } else {
-          // Add new record
           await db.customers.put({
-            id: customer.id.toString(),
+            id: remoteIdStr,
             ...customerData,
           });
         }
@@ -588,7 +963,7 @@ export async function pullFromSupabase() {
           description: category.description || "",
           createdAt: new Date(category.created_at).getTime(),
           updatedAt: new Date(category.updated_at).getTime(),
-          syncStatus: "synced",
+          syncStatus: "synced" as const,
           remoteId: category.id.toString(),
         };
 
@@ -642,10 +1017,10 @@ export async function pullFromSupabase() {
           customerId: sale.customer_id?.toString(),
           customerName: sale.customer_name,
           customerPhone: sale.customer_phone,
-          status: "completed",
+          status: "completed" as const,
           createdAt: new Date(sale.created_at).getTime(),
           updatedAt: new Date(sale.updated_at).getTime(),
-          syncStatus: "synced",
+          syncStatus: "synced" as const,
           remoteId: sale.id.toString(),
         };
 
@@ -717,11 +1092,24 @@ export async function pullFromSupabase() {
       for (const price of productPrices) {
         const existingPrice = await db.product_prices.where('remoteId').equals(price.id.toString()).first();
 
-        const priceData = {
-          productId: price.product_id.toString(),
-          price: price.price,
+        // ابحث عن المنتج المحلي المرتبط برقم product_id من السحابة
+        const remoteProductIdStr = price.product_id != null ? price.product_id.toString() : "";
+        let localProduct = remoteProductIdStr
+          ? await db.products.where('remoteId').equals(remoteProductIdStr).first()
+          : undefined;
+        if (!localProduct && remoteProductIdStr) {
+          localProduct = await db.products.get(remoteProductIdStr);
+        }
+        // المعرّف المحلي للمنتج (UUID إن وُجد، وإلا رقم product_id)
+        const localProductId = localProduct?.id ?? remoteProductIdStr;
+
+        const priceData: any = {
+          productId: localProductId, // احتفظ دائماً بالمعرّف المحلي للمنتج لضمان عمل بحث الأسعار
+          product_id: remoteProductIdStr || undefined,
+          price: Number(price.price) || 0,
           type: price.type,
           isActive: price.is_active,
+          is_active: price.is_active,
           effectiveFrom: price.effective_from ? new Date(price.effective_from).getTime() : Date.now(),
           effectiveTo: price.effective_to ? new Date(price.effective_to).getTime() : undefined,
           notes: price.notes,
@@ -733,10 +1121,13 @@ export async function pullFromSupabase() {
         };
 
         if (existingPrice) {
-          // Update existing local record
-          await db.product_prices.update(existingPrice.id, priceData);
+          // لا تغيّر productId المحلي إذا كان يشير لـ UUID صحيح
+          // (existingPrice.productId قد يكون UUID للمنتج المحلي — احتفظ به)
+          const preserveProductId = existingPrice.productId && localProduct && existingPrice.productId === localProduct.id
+            ? existingPrice.productId
+            : localProductId;
+          await db.product_prices.update(existingPrice.id, { ...priceData, productId: preserveProductId });
         } else {
-          // Add new record
           await db.product_prices.put({
             id: price.id.toString(),
             ...priceData,
@@ -745,32 +1136,40 @@ export async function pullFromSupabase() {
       }
 
       // تحديث أسعار المنتجات في جدول products بناءً على product_prices
+      // ملاحظة: نستخدم remoteId للبحث لأن الـ id المحلي عبارة عن UUID للمنتجات الجديدة
       const productPriceMap = new Map<string, { purchase: number; selling: number; marketing: number }>();
       for (const price of productPrices) {
-        const productId = price.product_id.toString();
-        if (!productPriceMap.has(productId)) {
-          productPriceMap.set(productId, { purchase: 0, selling: 0, marketing: 0 });
+        const productRemoteId = price.product_id.toString();
+        if (!productPriceMap.has(productRemoteId)) {
+          productPriceMap.set(productRemoteId, { purchase: 0, selling: 0, marketing: 0 });
         }
-        const prices = productPriceMap.get(productId)!;
+        const prices = productPriceMap.get(productRemoteId)!;
+        if (!price.is_active) continue;
         if (price.type === 'بيع' || price.type === 'selling') {
-          prices.selling = price.price;
+          prices.selling = Number(price.price) || prices.selling;
         } else if (price.type === 'شراء' || price.type === 'purchase') {
-          prices.purchase = price.price;
+          prices.purchase = Number(price.price) || prices.purchase;
         } else if (price.type === 'تسويق' || price.type === 'marketing') {
-          prices.marketing = price.price;
+          prices.marketing = Number(price.price) || prices.marketing;
         }
       }
 
-      // تحديث المنتجات بالأسعار الجديدة
-      for (const [productId, prices] of productPriceMap) {
-        const existingProduct = await db.products.get(productId);
-        if (existingProduct) {
-          await db.products.update(productId, {
-            costPrice: prices.purchase,
-            salePrice: prices.selling,
-            updatedAt: Date.now(),
-          });
-        }
+      // تحديث المنتجات بالأسعار الجديدة — البحث بـ remoteId أو id
+      for (const [productRemoteId, prices] of productPriceMap) {
+        // فقط حدّث إذا كانت لدينا أسعار فعلية (تجنب الكتابة فوق المحلي بأصفار)
+        if (prices.purchase === 0 && prices.selling === 0) continue;
+
+        let target = await db.products.where('remoteId').equals(productRemoteId).first();
+        if (!target) target = await db.products.get(productRemoteId);
+        if (!target) continue;
+        // لا تكتب فوق منتج فيه تغييرات محلية معلّقة
+        if (target.syncStatus && target.syncStatus !== "synced") continue;
+
+        await db.products.update(target.id, {
+          costPrice: prices.purchase || target.costPrice || 0,
+          salePrice: prices.selling || target.salePrice || 0,
+          updatedAt: Date.now(),
+        });
       }
     }
 

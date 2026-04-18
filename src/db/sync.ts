@@ -115,15 +115,15 @@ async function transformRecordForSupabase(tableName: string, record: any): Promi
   switch (tableName) {
     case "products": {
       const categoryText = await resolveCategoryText(record.categoryId);
+      // Schema: name, quantity, description, barcode, category, minimum_stock, is_active
       const payload: any = {
         name: record.name,
-        barcode: record.sku,
+        barcode: record.sku || null,
         category: categoryText,
-        quantity: record.stock || 0,
-        purchase_price: record.costPrice || 0,
-        selling_price: record.salePrice || 0,
-        min_stock: record.minStock || 10,
+        quantity: Math.max(0, Math.floor(record.stock || 0)),
+        minimum_stock: Math.max(0, Math.floor(record.minStock || 10)),
         description: record.notes || null,
+        is_active: true,
         created_at: baseRecord.created_at,
         updated_at: baseRecord.updated_at,
       };
@@ -133,14 +133,17 @@ async function transformRecordForSupabase(tableName: string, record: any): Promi
     }
 
     case "customers": {
+      // Schema: name (non-empty), phone (non-empty), is_active
+      const phone = (record.phone && record.phone.trim()) ? record.phone.trim() : "غير محدد";
       const payload: any = {
         name: record.name,
-        phone: record.phone || "",
+        phone,
         is_active: true,
         created_at: baseRecord.created_at,
         updated_at: baseRecord.updated_at,
       };
-      if (recordId !== undefined) payload.id = recordId;
+      if (remoteId !== undefined) payload.id = remoteId;
+      else if (typeof recordId === "number") payload.id = recordId;
       return payload;
     }
 
@@ -184,9 +187,61 @@ async function transformRecordForSupabase(tableName: string, record: any): Promi
       return payload;
     }
 
+    case "product_prices": {
+      const productRemoteId = await resolveRemoteId("products", record.productId);
+      if (productRemoteId === null || productRemoteId === undefined) {
+        // المنتج لم يُزامَن بعد — لا نستطيع رفع السعر الآن
+        throw new Error("PRODUCT_NOT_SYNCED_YET");
+      }
+      const payload: any = {
+        product_id: productRemoteId,
+        price: record.price,
+        type: record.type,
+        is_active: record.isActive !== false,
+        effective_from: record.effectiveFrom ? new Date(record.effectiveFrom).toISOString() : new Date().toISOString(),
+        effective_to: record.effectiveTo ? new Date(record.effectiveTo).toISOString() : null,
+        notes: record.notes || null,
+        quantity: record.quantity || 0,
+        created_at: baseRecord.created_at,
+        updated_at: baseRecord.updated_at,
+      };
+      if (remoteId !== undefined) payload.id = remoteId;
+      else if (typeof recordId === "number") payload.id = recordId;
+      return payload;
+    }
+
+    case "product_batches": {
+      const productRemoteId = await resolveRemoteId("products", record.productId);
+      if (productRemoteId === null || productRemoteId === undefined) {
+        throw new Error("PRODUCT_NOT_SYNCED_YET");
+      }
+      const payload: any = {
+        product_id: productRemoteId,
+        batch_name: record.batchName || record.batch_name || `Batch ${Date.now()}`,
+        original_quantity: Math.max(1, Math.floor(record.originalQuantity ?? record.original_quantity ?? 1)),
+        remaining_quantity: Math.max(0, Math.floor(record.remainingQuantity ?? record.remaining_quantity ?? 0)),
+        purchase_price: record.purchasePrice ?? record.purchase_price ?? 0,
+        selling_price: record.sellingPrice ?? record.selling_price ?? 0,
+        marketing_price: record.marketingPrice ?? record.marketing_price ?? null,
+        supplier: record.supplier || null,
+        expiry_date: record.expiryDate || record.expiry_date || null,
+        batch_code: record.batchCode || record.batch_code || null,
+        notes: record.notes || null,
+        is_active: record.isActive !== false,
+        is_expired: record.isExpired === true,
+        created_at: baseRecord.created_at,
+        updated_at: baseRecord.updated_at,
+      };
+      if (remoteId !== undefined) payload.id = remoteId;
+      else if (typeof recordId === "number") payload.id = recordId;
+      return payload;
+    }
+
     default:
-      if (numericId !== undefined) {
-        baseRecord.id = numericId;
+      if (remoteId !== undefined) {
+        baseRecord.id = remoteId;
+      } else if (typeof recordId === "number") {
+        baseRecord.id = recordId;
       } else {
         delete baseRecord.id;
       }
@@ -195,25 +250,28 @@ async function transformRecordForSupabase(tableName: string, record: any): Promi
 }
 
 // مزامنة البيانات مع Supabase
+// قفل لمنع تشغيل مزامنات متوازية تؤدي لسباق وكتابة بيانات قديمة فوق الجديدة
+let syncInFlight: Promise<SyncResult> | null = null;
+
 export async function syncWithSupabase(): Promise<SyncResult> {
   const supabase = getSupabase();
   if (!supabase) {
     return { success: false, errors: ["Supabase client not configured"] };
   }
 
-  console.log("🔄 بدء المزامنة مع Supabase...");
+  // إذا كانت هناك مزامنة جارية، أرجع نفس الـ Promise بدلاً من تشغيل واحدة جديدة
+  if (syncInFlight) {
+    return syncInFlight;
+  }
 
-  const errors: string[] = [];
-  let syncedCount = 0;
+  syncInFlight = (async (): Promise<SyncResult> => {
+    console.log("🔄 بدء المزامنة مع Supabase...");
+
+    const errors: string[] = [];
+    let syncedCount = 0;
 
   try {
-    // 1. تحميل التحديثات من Supabase أولاً
-    const pullResult = await pullFromSupabase();
-    if (!pullResult.success) {
-      errors.push(...(pullResult.errors || []));
-    }
-
-    // 2. رفع السجلات المعلقة
+    // 1. ادفع السجلات المعلقة (خاصة الحذف) أولاً قبل السحب لتجنب التعارض
     const pendingRecords = await getPendingRecords();
     console.log(`🔁 هناك ${pendingRecords.length} سجل (سجلات) في قائمة الانتظار للمزامنة.`);
     if (pendingRecords.length > 0) {
@@ -227,13 +285,14 @@ export async function syncWithSupabase(): Promise<SyncResult> {
       if (!supabaseTable) return;
 
       const transformedRecord = await transformRecordForSupabase(table, record);
-      const hasNumericId = transformedRecord.id !== undefined;
+      const hasNumericId = transformedRecord.id !== undefined && transformedRecord.id !== null;
       const response = hasNumericId
-        ? await supabase.from(supabaseTable).upsert(transformedRecord, { onConflict: "id" })
-        : await supabase.from(supabaseTable).insert(transformedRecord);
+        ? await supabase.from(supabaseTable).upsert(transformedRecord, { onConflict: "id" }).select()
+        : await supabase.from(supabaseTable).insert(transformedRecord).select();
 
       const error = response.error;
-      const returnedData = Array.isArray(response.data) ? response.data[0] : response.data;
+      const responseData: any = response.data;
+      const returnedData = Array.isArray(responseData) ? responseData[0] : responseData;
       const remoteId = returnedData?.id ? returnedData.id.toString() : undefined;
 
       if (error) {
@@ -247,14 +306,14 @@ export async function syncWithSupabase(): Promise<SyncResult> {
           message: error.message,
           status: response.status,
           data: response.data,
-          hint: response.error?.hint,
-          details: response.error?.details,
+          hint: (response.error as any)?.hint,
+          details: (response.error as any)?.details,
           transformedRecord,
         });
       } else {
         await markRecordsSynced(table, [record.id], remoteId ? { [record.id]: remoteId } : undefined);
         syncedCount++;
-        console.log(`✅ تم مزامنة ${table} record ${record.id}`);
+        console.log(`✅ تم مزامنة ${table} record ${record.id}`, remoteId ? `(remote id: ${remoteId})` : "");
       }
     };
 
@@ -262,37 +321,54 @@ export async function syncWithSupabase(): Promise<SyncResult> {
       const supabaseTable = SYNC_TABLES.find((t) => t.name === table)?.supabaseTable;
       if (!supabaseTable) return;
 
+      const target = (db as any)[table];
       const remoteKey = normalizeId(record.remoteId ?? record.id);
+
+      // No remote id — just remove locally
       if (remoteKey === undefined) {
-        await markRecordsSynced(table, [record.id]);
+        if (target) await target.delete(record.id);
         syncedCount++;
+        console.log(`🗑️ تم حذف ${table} record ${record.id} محلياً (بدون معرف بعيد)`);
         return;
       }
 
-      const { error } = await supabase.from(supabaseTable).delete().eq("id", remoteKey);
+      // Try DELETE first; if FK constraint blocks it, fall back to soft delete via is_active=false
+      let { error } = await supabase.from(supabaseTable).delete().eq("id", remoteKey);
+
       if (error) {
         const missingRelation = /(relation ".*" does not exist|missing relation)/i.test(error.message || "");
         if (missingRelation) {
           console.warn(`Skipping delete sync for ${table} because remote table ${supabaseTable} does not exist: ${error.message}`);
-          await markRecordsSynced(table, [record.id]);
+          if (target) await target.delete(record.id);
           syncedCount++;
           return;
         }
+
+        // Foreign key violation — soft-delete remotely instead
+        const fkConflict = /(foreign key|violates foreign key constraint|conflict)/i.test(error.message || "");
+        if (fkConflict && (table === "customers" || table === "products" || table === "categories")) {
+          const softPayload: any = { is_active: false, updated_at: new Date().toISOString() };
+          const softResult = await supabase.from(supabaseTable).update(softPayload).eq("id", remoteKey);
+          if (!softResult.error) {
+            if (target) await target.delete(record.id);
+            syncedCount++;
+            console.log(`🗑️ تم تعطيل ${table} record ${record.id} (soft delete remote, FK محمي)`);
+            return;
+          }
+          error = softResult.error;
+        }
+
         errors.push(`Error deleting ${table} record ${record.id}: ${error.message}`);
+        console.error(`❌ فشل حذف ${table} record ${record.id}:`, error);
       } else {
-        await markRecordsSynced(table, [record.id]);
+        // Success — physically remove from local DB
+        if (target) await target.delete(record.id);
         syncedCount++;
+        console.log(`🗑️ تم حذف ${table} record ${record.id} من السحابة والمحلي`);
       }
     };
 
-    for (const { table, record } of activeRecords) {
-      try {
-        await syncRecord(table, record);
-      } catch (err) {
-        errors.push(`Failed to sync ${table} record ${record.id}: ${err}`);
-      }
-    }
-
+    // 2. عالج عمليات الحذف أولاً قبل الـ upserts و الـ pull
     for (const { table, record } of deletedRecords.sort((a, b) => {
       const indexA = SYNC_TABLES.findIndex((t) => t.name === a.table);
       const indexB = SYNC_TABLES.findIndex((t) => t.name === b.table);
@@ -305,17 +381,48 @@ export async function syncWithSupabase(): Promise<SyncResult> {
       }
     }
 
+    // 3. ارفع السجلات النشطة (إنشاء/تحديث)
+    for (const { table, record } of activeRecords) {
+      try {
+        await syncRecord(table, record);
+      } catch (err: any) {
+        // تخطي صامت إذا كان السبب أن المنتج لم يُزامَن بعد — سيُعاد في الدورة التالية
+        if (err?.message === "PRODUCT_NOT_SYNCED_YET" || /PRODUCT_NOT_SYNCED_YET/.test(String(err))) {
+          console.log(`⏸️ تأجيل مزامنة ${table} record ${record.id} حتى مزامنة المنتج`);
+          continue;
+        }
+        errors.push(`Failed to sync ${table} record ${record.id}: ${err}`);
+      }
+    }
+
+    // 4. اسحب التحديثات من Supabase أخيراً
+    const pullResult = await pullFromSupabase();
+    if (!pullResult.success) {
+      errors.push(...(pullResult.errors || []));
+    }
+
     return {
       success: errors.length === 0,
       errors: errors.length > 0 ? errors : undefined,
       syncedRecords: syncedCount,
     };
+    } catch (err) {
+      return {
+        success: false,
+        errors: [`Sync failed: ${err}`],
+      };
+    }
+  })();
 
+  try {
+    return await syncInFlight;
   } catch (err) {
     return {
       success: false,
       errors: [`Sync failed: ${err}`],
     };
+  } finally {
+    syncInFlight = null;
   }
 }
 

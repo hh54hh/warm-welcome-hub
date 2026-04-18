@@ -1,5 +1,6 @@
 import { Fragment, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
+import { useNavigate } from "react-router-dom";
 import { db, now } from "@/db/database";
 import { deleteCustomer as deleteCustomerService } from "@/db/services";
 import { fmtCurrency, fmtDateTime } from "@/lib/format";
@@ -7,7 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import CustomerStatementPrint from "@/components/CustomerStatementPrint";
-import { CheckCircle, Loader } from "lucide-react";
+import PayCreditDialog from "@/components/PayCreditDialog";
+import { CheckCircle, Loader, Wallet, Undo2 } from "lucide-react";
 
 interface CustomerSummary {
   id: string; // derived id (name|phone or customer id)
@@ -23,16 +25,24 @@ interface CustomerSummary {
 }
 
 const Customers = () => {
+  const navigate = useNavigate();
   const [active, setActive] = useState<CustomerSummary | null>(null);
   const [printStatement, setPrintStatement] = useState<CustomerSummary | null>(null);
+  const [payTarget, setPayTarget] = useState<CustomerSummary | null>(null);
 
-  const customers = useLiveQuery(() => db.customers.orderBy("name").toArray(), []);
+  const customers = useLiveQuery(
+    () => db.customers.orderBy("name").toArray().then((list) => list.filter((c) => !c.deletedAt && c.syncStatus !== "deleted")),
+    []
+  );
   const invoices = useLiveQuery(() => db.invoices.toArray(), []);
   const customerCredits = useLiveQuery(() => db.customer_credits.toArray(), []);
 
   const deleteCustomer = async (c: CustomerSummary) => {
-    const ok = window.confirm("هل أنت متأكد أنك تريد حذف هذا الزبون؟ سيتم إزالة البيانات المرتبطة به محلياً.");
+    const ok = window.confirm("هل أنت متأكد أنك تريد حذف هذا الزبون؟ سيتم حذفه نهائياً من جميع الأماكن.");
     if (!ok) return;
+
+    // أغلق الكشف فوراً وأظهر إشعاراً مباشراً
+    setActive(null);
 
     try {
       if (c.recordId) {
@@ -46,7 +56,6 @@ const Customers = () => {
         });
         toast.success("تم حذف بيانات الزبون من الفواتير");
       }
-      setActive(null);
     } catch (e: any) {
       console.error(e);
       toast.error("خطأ أثناء حذف الزبون");
@@ -141,9 +150,9 @@ const Customers = () => {
               <div className="flex items-center gap-2">
                 <div className="font-semibold truncate">{c.name ?? "زبون"}</div>
                 {c.syncStatus === "synced" ? (
-                  <CheckCircle className="h-4 w-4 text-green-500 flex-shrink-0" title="متزامن" />
+                  <span title="متزامن" className="inline-flex"><CheckCircle className="h-4 w-4 text-green-500 flex-shrink-0" /></span>
                 ) : (
-                  <Loader className="h-4 w-4 text-blue-500 animate-spin flex-shrink-0" title="قيد المزامنة" />
+                  <span title="قيد المزامنة" className="inline-flex"><Loader className="h-4 w-4 text-blue-500 animate-spin flex-shrink-0" /></span>
                 )}
               </div>
               {c.phone && <div className="text-xs text-muted-foreground nums">{c.phone}</div>}
@@ -152,7 +161,31 @@ const Customers = () => {
               <div className={`font-bold nums ${c.balance > 0 ? "text-destructive" : "text-success"}`}>
                 {fmtCurrency(c.balance)}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2 justify-end">
+                {c.balance > 0 && c.recordId && (
+                  <Button
+                    size="sm"
+                    className="gradient-gold text-primary font-semibold"
+                    onClick={() => setPayTarget(c)}
+                  >
+                    <Wallet className="h-4 w-4" />
+                    تسديد
+                  </Button>
+                )}
+                {c.balance > 0 && c.invoices.length > 0 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      const lastInv = [...c.invoices].sort((a, b) => b.createdAt - a.createdAt)[0];
+                      if (lastInv) navigate(`/returns/${lastInv.id}`);
+                      else toast.error("لا توجد فاتورة لإنشاء مرتجع");
+                    }}
+                  >
+                    <Undo2 className="h-4 w-4" />
+                    مرتجع
+                  </Button>
+                )}
                 <Button size="sm" variant="ghost" onClick={() => setActive(c)}>
                   عرض الكشف
                 </Button>
@@ -238,6 +271,15 @@ const Customers = () => {
           onClose={() => setPrintStatement(null)}
         />
       )}
+
+      <PayCreditDialog
+        open={!!payTarget}
+        onOpenChange={(v) => !v && setPayTarget(null)}
+        customerId={payTarget?.recordId}
+        customerName={payTarget?.name}
+        balance={payTarget?.balance ?? 0}
+        onPaid={() => setPayTarget(null)}
+      />
     </div>
   );
 };
