@@ -406,12 +406,17 @@ export async function syncWithSupabase(): Promise<SyncResult> {
       errors: errors.length > 0 ? errors : undefined,
       syncedRecords: syncedCount,
     };
+  })();
 
+  try {
+    return await syncInFlight;
   } catch (err) {
     return {
       success: false,
       errors: [`Sync failed: ${err}`],
     };
+  } finally {
+    syncInFlight = null;
   }
 }
 
