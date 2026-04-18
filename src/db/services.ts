@@ -60,11 +60,29 @@ export async function createProduct(
 
 export async function updateProduct(id: string, patch: Partial<Product>) {
   await db.products.update(id, { ...patch, updatedAt: now(), syncStatus: "local" });
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after updateProduct failed:", err));
+  }
   return db.products.get(id);
 }
 
 export async function deleteProduct(id: string) {
-  await db.products.delete(id);
+  // Soft delete so the sync layer can propagate it to Supabase
+  const existing = await db.products.get(id);
+  if (!existing) return;
+  if (existing.remoteId) {
+    await db.products.update(id, {
+      syncStatus: "deleted",
+      deletedAt: now(),
+      updatedAt: now(),
+    });
+    if (getSupabase()) {
+      syncWithSupabase().catch((err) => console.warn("Auto-sync after deleteProduct failed:", err));
+    }
+  } else {
+    // Never reached the cloud, safe to fully remove locally
+    await db.products.delete(id);
+  }
 }
 
 export async function adjustStock(productId: string, delta: number, note?: string) {
@@ -72,7 +90,11 @@ export async function adjustStock(productId: string, delta: number, note?: strin
   if (!p) throw new Error("منتج غير موجود");
   const newStock = p.stock + delta;
   if (newStock < 0) throw new Error("لا توجد كمية كافية في المخزن");
-  await db.products.update(productId, { stock: newStock, updatedAt: now() });
+  await db.products.update(productId, {
+    stock: newStock,
+    updatedAt: now(),
+    syncStatus: "local", // Critical: mark dirty so pull doesn't overwrite
+  });
   await db.movements.add({
     id: uid(),
     productId,
@@ -83,6 +105,9 @@ export async function adjustStock(productId: string, delta: number, note?: strin
     updatedAt: now(),
     syncStatus: "local",
   });
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after adjustStock failed:", err));
+  }
 }
 
 /* ========== الفئات ========== */
@@ -151,11 +176,18 @@ export async function createCustomer(
 
 export async function updateCustomer(id: string, patch: Partial<Customer>) {
   await db.customers.update(id, { ...patch, updatedAt: now(), syncStatus: "local" });
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after updateCustomer failed:", err));
+  }
   return db.customers.get(id);
 }
 
 export async function deleteCustomer(id: string) {
+  const customer = await db.customers.get(id);
+  if (!customer) return;
+
   await db.transaction("rw", [db.customers, db.invoices, db.payments, db.customer_credits, db.credit_payments], async () => {
+    // Detach customer from invoices and mark them pending so the change is pushed
     await db.invoices.where("customerId").equals(id).modify({
       customerId: undefined,
       customerName: undefined,
@@ -163,14 +195,26 @@ export async function deleteCustomer(id: string) {
       updatedAt: now(),
       syncStatus: "local",
     });
+    // Local-only payment & credit records — local deletes are fine
     await db.payments.where("customerId").equals(id).delete();
     await db.customer_credits.where("customer_id").equals(id).delete();
-    await db.customers.update(id, {
-      syncStatus: "deleted",
-      deletedAt: now(),
-      updatedAt: now(),
-    });
+
+    if (customer.remoteId) {
+      // Soft delete: sync layer will DELETE on Supabase
+      await db.customers.update(id, {
+        syncStatus: "deleted",
+        deletedAt: now(),
+        updatedAt: now(),
+      });
+    } else {
+      // Never synced — just remove locally
+      await db.customers.delete(id);
+    }
   });
+
+  if (getSupabase()) {
+    syncWithSupabase().catch((err) => console.warn("Auto-sync after deleteCustomer failed:", err));
+  }
 }
 
 export async function listPayments() {
@@ -509,15 +553,23 @@ export async function pullFromSupabase() {
       for (const product of products) {
         const existingProduct = await db.products.where('remoteId').equals(product.id.toString()).first();
 
+        // CRITICAL: never overwrite local records that have unpushed changes
+        if (existingProduct && existingProduct.syncStatus && existingProduct.syncStatus !== "synced") {
+          continue;
+        }
+
         const productData = {
           name: product.name,
           sku: product.barcode || product.id.toString(),
           categoryId: product.category?.toString(),
-          costPrice: product.purchase_price || 0,
-          salePrice: product.selling_price || 0,
+          costPrice: existingProduct?.costPrice ?? 0, // prices live in product_prices; keep local
+          salePrice: existingProduct?.salePrice ?? 0,
           stock: product.quantity || 0,
           minStock: product.minimum_stock || product.min_stock || 10,
           notes: product.description,
+          unit: existingProduct?.unit,
+          brand: existingProduct?.brand,
+          model: existingProduct?.model,
           createdAt: new Date(product.created_at).getTime(),
           updatedAt: new Date(product.updated_at).getTime(),
           syncStatus: "synced" as const,
@@ -525,10 +577,8 @@ export async function pullFromSupabase() {
         };
 
         if (existingProduct) {
-          // Update existing local record
           await db.products.update(existingProduct.id, productData);
         } else {
-          // Add new record
           await db.products.put({
             id: product.id.toString(),
             ...productData,
@@ -547,8 +597,16 @@ export async function pullFromSupabase() {
     } else if (customers) {
       for (const customer of customers) {
         const existingCustomer = await db.customers.where('remoteId').equals(customer.id.toString()).first();
-        if (existingCustomer?.deletedAt) {
-          // Skip customers that are deleted locally
+        if (existingCustomer?.deletedAt) continue;
+        // Skip customers that have local pending changes
+        if (existingCustomer && existingCustomer.syncStatus && existingCustomer.syncStatus !== "synced") {
+          continue;
+        }
+        // Skip inactive customers from the cloud (treated as deleted)
+        if (customer.is_active === false) {
+          if (existingCustomer && !existingCustomer.deletedAt) {
+            await db.customers.delete(existingCustomer.id);
+          }
           continue;
         }
 
@@ -562,10 +620,8 @@ export async function pullFromSupabase() {
         };
 
         if (existingCustomer) {
-          // Update existing local record
           await db.customers.update(existingCustomer.id, customerData);
         } else {
-          // Add new record
           await db.customers.put({
             id: customer.id.toString(),
             ...customerData,
