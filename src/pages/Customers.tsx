@@ -1,5 +1,6 @@
 import { Fragment, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
+import { useNavigate } from "react-router-dom";
 import { db, now } from "@/db/database";
 import { deleteCustomer as deleteCustomerService } from "@/db/services";
 import { fmtCurrency, fmtDateTime } from "@/lib/format";
@@ -7,7 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import CustomerStatementPrint from "@/components/CustomerStatementPrint";
-import { CheckCircle, Loader } from "lucide-react";
+import PayCreditDialog from "@/components/PayCreditDialog";
+import { CheckCircle, Loader, Wallet, Undo2 } from "lucide-react";
 
 interface CustomerSummary {
   id: string; // derived id (name|phone or customer id)
