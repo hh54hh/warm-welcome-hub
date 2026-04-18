@@ -34,8 +34,11 @@ const Customers = () => {
   const customerCredits = useLiveQuery(() => db.customer_credits.toArray(), []);
 
   const deleteCustomer = async (c: CustomerSummary) => {
-    const ok = window.confirm("هل أنت متأكد أنك تريد حذف هذا الزبون؟ سيتم إزالة البيانات المرتبطة به محلياً.");
+    const ok = window.confirm("هل أنت متأكد أنك تريد حذف هذا الزبون؟ سيتم حذفه نهائياً من جميع الأماكن.");
     if (!ok) return;
+
+    // أغلق الكشف فوراً وأظهر إشعاراً مباشراً
+    setActive(null);
 
     try {
       if (c.recordId) {
@@ -49,7 +52,6 @@ const Customers = () => {
         });
         toast.success("تم حذف بيانات الزبون من الفواتير");
       }
-      setActive(null);
     } catch (e: any) {
       console.error(e);
       toast.error("خطأ أثناء حذف الزبون");
