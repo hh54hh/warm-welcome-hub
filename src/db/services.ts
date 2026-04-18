@@ -642,20 +642,31 @@ export async function pullFromSupabase() {
           continue;
         }
 
-        // ابحث عن أحدث الأسعار محلياً لهذا المنتج (مفهرسة بـ productId المحلي)
+        // ابحث عن أحدث الأسعار محلياً لهذا المنتج
+        // المفتاح productId قد يكون UUID المحلي أو remoteId الرقمي للمنتج (بحسب من أنشأ السجل)
         let bestCost = existingProduct?.costPrice ?? 0;
         let bestSale = existingProduct?.salePrice ?? 0;
         if (existingProduct) {
-          const localPrices = await db.product_prices
-            .where('productId').equals(existingProduct.id).toArray();
+          const productKeys = new Set<string>();
+          productKeys.add(existingProduct.id);
+          if (existingProduct.remoteId) productKeys.add(existingProduct.remoteId.toString());
+          const allLocalPrices = await db.product_prices.toArray();
+          const localPrices = allLocalPrices.filter((pr: any) => {
+            const pid = pr.productId !== undefined && pr.productId !== null ? pr.productId.toString() : "";
+            const pid2 = pr.product_id !== undefined && pr.product_id !== null ? pr.product_id.toString() : "";
+            return productKeys.has(pid) || productKeys.has(pid2);
+          });
           for (const pr of localPrices) {
-            if (pr.isActive === false) continue;
+            if (pr.isActive === false || pr.is_active === false) continue;
             const v = Number(pr.price) || 0;
             if (!v) continue;
             if (pr.type === 'شراء' || pr.type === 'purchase') bestCost = v;
             else if (pr.type === 'بيع' || pr.type === 'selling') bestSale = v;
           }
         }
+        // إذا كانت الأسعار المحلية صفر/مفقودة، حافظ على القيم الموجودة سابقاً
+        if (!bestCost && existingProduct?.costPrice) bestCost = existingProduct.costPrice;
+        if (!bestSale && existingProduct?.salePrice) bestSale = existingProduct.salePrice;
 
         const productData = {
           name: product.name,
